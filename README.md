@@ -43,6 +43,12 @@ The theme button in the top bar opens a Light / Dark / System menu. System follo
 `⌘⇧L` toggles light and dark directly. The choice is stored in `localStorage` under `mindmap.theme`.
 The tactical UI ignores it and always renders dark.
 
+## Notes
+
+Every node can carry free text. Press `⌘I` (or the notes button in the top bar) to open the notes pane for
+the selected node; nodes with notes show a small marker you can click. Notes are stored as `node.notes`
+and autosave like everything else. The tactical UI edits the same notes from its NODE DATA panel.
+
 ## Styling
 
 Select a node to get a floating format bar: fill color, text color, bold (`⌘B`), strikethrough (`⌘⇧X`).

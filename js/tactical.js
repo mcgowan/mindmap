@@ -60,6 +60,8 @@
     const sig = [state.selectedId, state.editingId, state.map.updatedAt, state.layout.nodes.length,
       $('#zoom-level').textContent, $('#save-status').className, sel && JSON.stringify(sel.node.style || {})].join('|');
     if (sig === lastSig) return;
+    const typingNotes = document.activeElement && document.activeElement.classList.contains('notes-input');
+    if (typingNotes) return; // re-render after blur; keeps the caret where it is
     lastSig = sig;
 
     const root = state.map.root;
@@ -110,7 +112,7 @@
       const rows = root.children.map((c, i) => {
         const ln = L.byId.get(c.id);
         const color = ln ? ln.color : Layout.PALETTE[(c.color !== undefined ? c.color : i) % Layout.PALETTE.length];
-        return `<li data-id="${c.id}"><i class="sym sym--branch" style="color:${color}"></i><span class="ttl">${esc(c.text)}</span><span class="cnt">${countNodes(c) - 1} SUB · ${(c.side || 'R')}</span></li>`;
+        return `<li data-id="${c.id}"><i class="sym sym--branch" style="color:${color}"></i><span class="ttl">${esc(c.text)}${c.notes ? ' <i class="note-flag">N</i>' : ''}</span><span class="cnt">${countNodes(c) - 1} SUB · ${(c.side || 'R')}</span></li>`;
       }).join('');
       body.innerHTML = `
         <div class="empty__msg"><b>NO NODE LOCKED</b>SELECT A NODE ON SCOPE<br>OR TYPE TO EDIT THE ROOT</div>
@@ -149,6 +151,10 @@
         <section>
           <h3 class="panel__h3">Path <span>${trail.length - 1} HOPS</span></h3>
           <ol class="path">${trail.map((n, i) => `<li class="${i < trail.length - 1 ? 'link' : ''}" data-id="${n.id}">${esc(n.text)}</li>`).join('')}</ol>
+        </section>
+        <section>
+          <h3 class="panel__h3">Notes <span>${node.notes ? `${node.notes.length} CHARS` : 'NONE'}</span></h3>
+          <textarea class="notes-input" data-id="${node.id}" placeholder="FREE TEXT · INTEL, CONTEXT, LINKS" spellcheck="false">${esc(node.notes || '')}</textarea>
         </section>
         <section>
           <h3 class="panel__h3">Children <span>${node.children.length}</span></h3>

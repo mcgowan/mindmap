@@ -76,11 +76,13 @@
           <button id="zoom-in" class="icon-btn" title="Zoom in" data-icon="plus"></button>
           <button id="zoom-fit" class="icon-btn" title="Fit to screen" data-icon="fit"></button>
         </div>
+        <button id="notes-btn" class="icon-btn" title="Notes (⌘I)" data-icon="note"></button>
         <button id="help-btn" class="icon-btn" title="Keyboard shortcuts" data-icon="help"></button>
         <button class="icon-btn theme-toggle" title="Toggle theme" data-icon="sun"></button>
       </div>
     </header>
 
+    <div class="editor-body">
     <div id="viewport" class="viewport">
       <div id="world" class="world">
         <svg id="links" class="links"></svg>
@@ -106,6 +108,23 @@
         <span><kbd>?</kbd> all shortcuts</span>
       </div>
       <div class="map-stats" id="map-stats"></div>
+    </div>
+
+    <aside id="notes-pane" class="notes-pane" hidden>
+      <div class="notes-head">
+        <span class="notes-label" data-icon="note">Notes</span>
+        <button id="notes-close" class="icon-btn" title="Close notes" data-icon="x"></button>
+      </div>
+      <div class="notes-body">
+        <div class="notes-empty" id="notes-empty">Select a node to read or write its notes.</div>
+        <div id="notes-content" hidden>
+          <div class="notes-node" id="notes-node"></div>
+          <div class="notes-meta" id="notes-meta"></div>
+          <textarea id="notes-input" class="notes-input" placeholder="Write notes for this node. Context, links, decisions, anything that doesn't belong in the node text." spellcheck="true"></textarea>
+          <div class="notes-foot"><span id="notes-count"></span><span>Saved automatically</span></div>
+        </div>
+      </div>
+    </aside>
     </div>
 
     <aside id="help" class="help" hidden>

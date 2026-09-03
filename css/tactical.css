@@ -289,6 +289,19 @@ body { background: var(--bg); color: var(--text); }
 .hint-block span { display: inline-block; white-space: nowrap; margin-right: 14px; }
 .hint-block kbd { border-radius: 0; background: rgba(74, 246, 38, 0.08); border-color: var(--line); color: var(--phos); font-size: 10px; }
 
+/* notes */
+.notes-input {
+  display: block; width: 100%; min-height: 110px; resize: vertical; border-radius: 0;
+  padding: 10px 12px; border: 1px solid var(--line); background: rgba(0, 0, 0, 0.3);
+  color: var(--text); font-family: var(--font); font-size: 13px; line-height: 1.5; outline: none;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+}
+.notes-input::placeholder { color: var(--muted); letter-spacing: 0.14em; text-transform: uppercase; font-size: 11px; }
+.notes-input:focus { border-color: var(--phos); box-shadow: 0 0 12px var(--phos-faint); }
+.note-flag { font-style: normal; font-size: 9px; font-weight: 700; color: #04170a; background: var(--phos); padding: 0 4px; margin-left: 6px; letter-spacing: 0.1em; vertical-align: middle; }
+.note-mark { border-radius: 0; box-shadow: 0 0 0 2px #03110a; }
+.note-mark::before { background: #04170a; box-shadow: 0 2.5px 0 #04170a; }
+
 /* ---------- status bar ---------- */
 .statusbar {
   flex: none; height: 40px; display: flex; align-items: center; gap: 26px; padding: 0 22px;

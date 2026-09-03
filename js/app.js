@@ -30,6 +30,7 @@
     paste: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M9 14l2 2 4-4"/>',
     eraser: '<path d="M20 20H7L3 16a2 2 0 0 1 0-3l9-9a2 2 0 0 1 3 0l6 6a2 2 0 0 1 0 3l-7 7"/><path d="M6 11l7 7"/>',
     monitor: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>',
+    note: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h6"/>',
     check: '<path d="M20 6L9 17l-5-5"/>',
     trash: '<path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>',
   };
@@ -59,6 +60,8 @@
     stats: $('#map-stats'),
     stylebar: $('#stylebar'),
     sbPop: $('#sb-pop'),
+    notesPane: $('#notes-pane'),
+    notesBtn: $('#notes-btn'),
   };
 
   /* ---------------------------------------------------------------- theme */
@@ -336,6 +339,7 @@
     el.editor.hidden = false;
     el.title.value = map.title;
     if (ensureBranchColors()) Store.save(map, { touch: false });
+    setNotesPaneOpen(localStorage.getItem(NOTES_PANE_KEY) === '1', { focus: false });
     setStatus('saved');
     updateUndoButtons();
     applyView();
@@ -387,6 +391,7 @@
     persist();
     relayout();
     select(state.selectedId);
+    renderNotesPane({ force: true });
   }
   function undo() {
     if (state.editingId) commitEdit();
@@ -426,7 +431,7 @@
         n = document.createElement('div');
         n.className = 'node';
         n.dataset.id = ln.id;
-        n.innerHTML = '<span class="node-text"></span><button class="badge" tabindex="-1" title="Collapse / expand"></button>';
+        n.innerHTML = '<span class="node-text"></span><button class="badge" tabindex="-1" title="Collapse / expand"></button><i class="note-mark"></i>';
         nodeEls.set(ln.id, n);
         el.nodes.appendChild(n);
       }
@@ -490,7 +495,9 @@
       + (ln.id === state.selectedId ? ' selected' : '')
       + (ln.id === state.editingId ? ' editing' : '')
       + (ln.node.style && ln.node.style.bold ? ' is-bold' : '')
-      + (ln.node.style && ln.node.style.strike ? ' is-strike' : '');
+      + (ln.node.style && ln.node.style.strike ? ' is-strike' : '')
+      + (ln.node.notes ? ' has-notes' : '');
+    $('.note-mark', n).title = ln.node.notes ? ln.node.notes.slice(0, 160) + (ln.node.notes.length > 160 ? '…' : '') : '';
     n.style.setProperty('--branch', ln.color || 'var(--accent)');
     const st = ln.node.style || {};
     n.style.background = st.bg || '';
@@ -509,6 +516,7 @@
     if (n) n.classList.add('selected');
     if (reveal && id) ensureVisible(id);
     updateStyleBar();
+    renderNotesPane();
   }
 
   /* ---------- editing ---------- */
@@ -596,6 +604,7 @@
     found.node.text = txt.textContent.replace(/\n/g, ' ');
     relayout();
     ensureVisible(state.editingId);
+    renderNotesPane();
   });
   el.nodes.addEventListener('paste', e => {
     if (!e.target.closest('.node-text[contenteditable="true"]')) return;
@@ -835,6 +844,84 @@
   // keep the bar from stealing keyboard focus from the canvas
   el.stylebar.addEventListener('mousedown', e => e.preventDefault());
 
+  /* ---------- notes ---------- */
+  const NOTES_PANE_KEY = 'mindmap.notesPane';
+  let notesSnapshot = null;
+  let notesDirty = false;
+
+  function autosize(ta) {
+    if (ta.closest('.notes-pane')) return; // the standard pane's text area fills the pane via flex
+    ta.style.height = 'auto';
+    ta.style.height = Math.max(160, ta.scrollHeight + 2) + 'px';
+  }
+  function setNotesPaneOpen(open, { focus = true } = {}) {
+    if (!el.notesPane) return;
+    const before = viewportRect().width;
+    el.notesPane.hidden = !open;
+    localStorage.setItem(NOTES_PANE_KEY, open ? '1' : '0');
+    if (el.notesBtn) el.notesBtn.classList.toggle('active', open);
+    renderNotesPane({ force: true });
+    // the canvas is centered on the viewport, so keep the map where it was on screen
+    if (state.map) { state.view.x -= (viewportRect().width - before) / 2; applyView(); }
+    if (open && focus) {
+      const ta = $('#notes-input');
+      if (ta && !$('#notes-content').hidden) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+    }
+  }
+  function renderNotesPane({ force = false } = {}) {
+    if (!el.notesPane || el.notesPane.hidden || !state.map) return;
+    const f = state.selectedId ? findNode(state.map.root, state.selectedId) : null;
+    $('#notes-empty').hidden = !!f;
+    $('#notes-content').hidden = !f;
+    if (!f) return;
+    const ta = $('#notes-input');
+    $('#notes-node').textContent = f.node.text || 'Untitled';
+    const kids = f.node.children.length;
+    $('#notes-meta').textContent = (f.parent ? `Depth ${f.depth}` : 'Central node') + ` · ${kids} child${kids === 1 ? '' : 'ren'}`;
+    const notes = f.node.notes || '';
+    const focused = document.activeElement === ta && ta.dataset.id === f.node.id;
+    if (!focused || force) {
+      if (ta.value !== notes) ta.value = notes;
+      ta.dataset.id = f.node.id;
+      autosize(ta);
+    }
+    $('#notes-count').textContent = notes.length ? `${notes.length} character${notes.length === 1 ? '' : 's'}` : 'No notes yet';
+  }
+  function setNodeNotes(id, value) {
+    const f = findNode(state.map.root, id);
+    if (!f) return;
+    if (!notesDirty) { pushUndo(notesSnapshot || snapshot()); notesDirty = true; }
+    if (value.trim()) f.node.notes = value; else delete f.node.notes;
+    const n = nodeEls.get(id);
+    if (n) {
+      n.classList.toggle('has-notes', !!f.node.notes);
+      $('.note-mark', n).title = f.node.notes ? f.node.notes.slice(0, 160) + (f.node.notes.length > 160 ? '…' : '') : '';
+    }
+    persist();
+    const c = $('#notes-count');
+    if (c) c.textContent = value.length ? `${value.length} character${value.length === 1 ? '' : 's'}` : 'No notes yet';
+  }
+  // Any textarea.notes-input on the page (standard pane or tactical panel) edits the node named by data-id.
+  document.addEventListener('focusin', e => {
+    if (!e.target.classList || !e.target.classList.contains('notes-input')) return;
+    notesSnapshot = state.map ? snapshot() : null;
+    notesDirty = false;
+  });
+  document.addEventListener('input', e => {
+    const ta = e.target;
+    if (!ta.classList || !ta.classList.contains('notes-input') || !state.map) return;
+    autosize(ta);
+    setNodeNotes(ta.dataset.id || state.selectedId, ta.value);
+  });
+  document.addEventListener('keydown', e => {
+    const ta = e.target;
+    if (!ta.classList || !ta.classList.contains('notes-input')) return;
+    if (e.key === 'Escape' || ((e.metaKey || e.ctrlKey) && e.key === 'Enter')) { e.preventDefault(); ta.blur(); }
+  });
+  if (el.notesBtn) el.notesBtn.addEventListener('click', () => setNotesPaneOpen(el.notesPane.hidden));
+  const notesClose = $('#notes-close');
+  if (notesClose) notesClose.addEventListener('click', () => setNotesPaneOpen(false));
+
   /* ---------- navigation ---------- */
   function nearestVertical(id, dir) {
     const L = state.layout, cur = L.byId.get(id);
@@ -1001,6 +1088,7 @@
     if (nodeEl) {
       const id = nodeEl.dataset.id;
       if (e.target.closest('.badge')) { e.preventDefault(); toggleCollapse(id); return; }
+      if (e.target.closest('.note-mark')) { e.preventDefault(); if (state.editingId) commitEdit(); select(id, { reveal: false }); setNotesPaneOpen(true); return; }
       if (state.editingId === id) return;
       e.preventDefault();
       if (state.editingId) commitEdit();
@@ -1083,6 +1171,8 @@
       [['Shift', 'Enter'], 'Commit only (while editing)'],
       [['Esc'], 'Stop editing'],
       [['⌫'], 'Delete the node and its branch'],
+      [[MOD, 'I'], 'Open the notes pane for the node'],
+      [['Esc'], 'Leave the notes pane (while writing notes)'],
     ]],
     ['Navigate', [
       [['↑', '↓'], 'Move between siblings'],
@@ -1156,6 +1246,7 @@
     if (key === 'Backspace' || key === 'Delete') { e.preventDefault(); deleteNode(id); return; }
     if (key === ' ' || key === 'F2') { e.preventDefault(); startEdit(id); return; }
     if (mod && key === '/') { e.preventDefault(); toggleCollapse(id); return; }
+    if (mod && !e.shiftKey && key.toLowerCase() === 'i') { e.preventDefault(); setNotesPaneOpen(!el.notesPane || el.notesPane.hidden); return; }
     if (mod && !e.shiftKey && key.toLowerCase() === 'b') { e.preventDefault(); toggleStyle(id, 'bold'); return; }
     if (mod && e.shiftKey && key.toLowerCase() === 'x') { e.preventDefault(); toggleStyle(id, 'strike'); return; }
     if (mod && e.shiftKey && key.toLowerCase() === 'c') { e.preventDefault(); copyStyle(id); return; }
