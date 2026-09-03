@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MINDSCOPE</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 fill=%27%23020705%27/%3E%3Cg stroke=%27%234af626%27 stroke-width=%272%27 fill=%27%234af626%27%3E%3Cpath d=%27M16 16L8 9M16 16l8-7M16 16l-8 7M16 16l8 7%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%274%27/%3E%3Ccircle cx=%278%27 cy=%279%27 r=%272.5%27/%3E%3Ccircle cx=%2724%27 cy=%279%27 r=%272.5%27/%3E%3Ccircle cx=%278%27 cy=%2723%27 r=%272.5%27/%3E%3Ccircle cx=%2724%27 cy=%2723%27 r=%272.5%27/%3E%3C/g%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Saira:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/styles.css">
+  <link rel="stylesheet" href="css/tactical.css">
+</head>
+<body>
+<div class="crt">
+
+  <!-- ============ MISSION FILES (library) ============ -->
+  <section id="home" class="view" hidden>
+    <header class="topbar">
+      <div class="topbar-left">
+        <a class="brand" href="#/"><span class="wordmark">MIND<b>SCOPE</b></span></a>
+        <span class="sub">AN/APG-MAP · TACTICAL MIND MAP</span>
+      </div>
+      <div class="topbar-center">
+        <label class="search">
+          <span data-icon="search"></span>
+          <input id="search" type="search" placeholder="SEARCH MISSION FILES" autocomplete="off" spellcheck="false">
+        </label>
+      </div>
+      <div class="topbar-right">
+        <button id="new-map" class="rng rng--on" type="button">+ NEW MAP</button>
+        <a class="rng" href="index.html" title="Switch to the standard interface">STD UI</a>
+        <span class="clock-wrap"><span class="clock js-clock">--:--:--</span><span class="date js-date">--- -- --- ----</span></span>
+      </div>
+    </header>
+
+    <main class="library">
+      <div class="library-head">
+        <h1>MISSION FILES</h1>
+        <span id="map-count" class="muted"></span>
+      </div>
+      <div id="cards" class="cards"></div>
+      <div id="empty" class="empty" hidden>
+        <div class="empty__msg"><b>NO MISSION FILES</b>CREATE A MAP TO BEGIN PLOTTING</div>
+        <button class="rng rng--on" id="empty-new" type="button">+ NEW MAP</button>
+      </div>
+    </main>
+
+    <footer class="statusbar">
+      <span>FILES<b class="js-file-count">0</b></span>
+      <span>STORE<b>LOCAL</b></span>
+      <span class="keys">KEYS<b>CLICK FILE TO OPEN</b></span>
+      <span class="legend"><span><i class="sym sym--root"></i>ROOT</span><span><i class="sym sym--branch"></i>BRANCH</span><span><i class="sym sym--leaf"></i>LEAF</span></span>
+    </footer>
+  </section>
+
+  <!-- ============ SCOPE (editor) ============ -->
+  <section id="editor" class="view" hidden>
+    <header class="topbar">
+      <div class="topbar-left">
+        <button id="back" class="icon-btn" title="Back to mission files" data-icon="arrow-left"></button>
+        <span class="wordmark wordmark--sm">MIND<b>SCOPE</b></span>
+        <input id="map-title" class="title-input" spellcheck="false" autocomplete="off" placeholder="UNTITLED MAP">
+      </div>
+      <div class="topbar-center">
+        <span id="save-status" class="save-status is-saved"><span class="dot"></span><span class="label">All changes saved</span></span>
+      </div>
+      <div class="topbar-right">
+        <div class="btn-group">
+          <button id="undo" class="icon-btn" title="Undo" data-icon="undo"></button>
+          <button id="redo" class="icon-btn" title="Redo" data-icon="redo"></button>
+        </div>
+        <div class="btn-group">
+          <button id="zoom-out" class="icon-btn" title="Zoom out" data-icon="minus"></button>
+          <button id="zoom-level" class="zoom-label" title="Reset zoom">100%</button>
+          <button id="zoom-in" class="icon-btn" title="Zoom in" data-icon="plus"></button>
+          <button id="zoom-fit" class="icon-btn" title="Fit to screen" data-icon="fit"></button>
+        </div>
+        <button id="help-btn" class="icon-btn" title="Keyboard shortcuts" data-icon="help"></button>
+        <a class="rng rng--sm" href="index.html" title="Switch to the standard interface">STD UI</a>
+        <span class="clock-wrap"><span class="clock js-clock">--:--:--</span><span class="date js-date">--- -- --- ----</span></span>
+      </div>
+    </header>
+
+    <div class="main">
+      <section class="scope-wrap">
+        <div id="viewport" class="viewport">
+          <div id="world" class="world">
+            <svg id="links" class="links"></svg>
+            <div id="nodes" class="nodes"></div>
+          </div>
+          <i class="corner corner--tl"></i><i class="corner corner--tr"></i>
+          <i class="corner corner--bl"></i><i class="corner corner--br"></i>
+          <div class="hud hud--tl">NODES<b class="js-hud-nodes">0</b><span class="js-hud-depth">DEPTH 0</span></div>
+          <div class="hud hud--tr">ZOOM<b class="js-hud-zoom">100%</b><span>SCOPE SCALE</span></div>
+          <div class="hud hud--bl">LINK<b class="js-hud-link">SYNCED</b><span>LOCAL STORE</span></div>
+          <div class="hud hud--br">LOCK<b class="js-hud-lock hud__red">NONE</b><span class="js-hud-lock-sub">NO TARGET</span></div>
+
+          <div id="stylebar" class="stylebar" hidden>
+            <button class="sb-btn" data-sb="bg" title="Fill color"><span class="sb-swatch" id="sb-bg-swatch"></span></button>
+            <button class="sb-btn" data-sb="color" title="Text color"><span class="sb-a" id="sb-color-swatch">A</span></button>
+            <span class="sb-sep"></span>
+            <button class="sb-btn" data-sb="bold" title="Bold (⌘B)"><b>B</b></button>
+            <button class="sb-btn" data-sb="strike" title="Strikethrough (⌘⇧X)"><s>S</s></button>
+            <span class="sb-sep"></span>
+            <button class="sb-btn" data-sb="copy" title="Copy style (⌘⇧C)" data-icon="roller"></button>
+            <button class="sb-btn" data-sb="paste" title="Paste style (⌘⇧V)" data-icon="paste"></button>
+            <button class="sb-btn" data-sb="clear" title="Clear style" data-icon="eraser"></button>
+            <div class="sb-pop" id="sb-pop" hidden></div>
+          </div>
+          <div class="hintbar" id="hintbar" hidden></div>
+          <div class="map-stats" id="map-stats" hidden></div>
+        </div>
+      </section>
+
+      <aside class="panel" id="panel">
+        <div class="panel__header">
+          <span>NODE DATA</span>
+          <span class="lock-status js-lock-status">NO LOCK</span>
+        </div>
+        <div class="panel__body js-panel-body" aria-live="polite"></div>
+      </aside>
+    </div>
+
+    <footer class="statusbar">
+      <span>NODES<b class="js-st-nodes">0</b></span>
+      <span>BRANCHES<b class="js-st-branches">0</b></span>
+      <span>DEPTH<b class="js-st-depth">0</b></span>
+      <span>LOCK<b class="js-st-lock">NONE</b></span>
+      <span class="keys">KEYS<b>⇥ CHILD · ↵ SIBLING · ⌫ DELETE · ⌘/ COLLAPSE · ? HELP</b></span>
+      <span class="legend"><span><i class="sym sym--root"></i>ROOT</span><span><i class="sym sym--branch"></i>BRANCH</span><span><i class="sym sym--leaf"></i>LEAF</span></span>
+    </footer>
+
+    <aside id="help" class="help" hidden>
+      <div class="help-head">
+        <h3>KEY BINDINGS</h3>
+        <button id="help-close" class="icon-btn" title="Close" data-icon="x"></button>
+      </div>
+      <div class="help-body" id="help-body"></div>
+    </aside>
+  </section>
+</div>
+
+<div class="scanlines" aria-hidden="true"></div>
+<div class="boot" aria-hidden="true"><span>MINDSCOPE ▸ SCOPE INIT ▸ LOADING MISSION FILES<i class="cursor">_</i></span></div>
+
+<!-- offscreen text measurer (must share node styles) -->
+<div id="measure" class="node measure depth-n"><span class="node-text"></span></div>
+
+<script src="js/store.js"></script>
+<script src="js/layout.js"></script>
+<script src="js/tactical.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
