@@ -374,6 +374,17 @@ html.theme-transition, html.theme-transition *, html.theme-transition *::before,
 .node.is-bold { font-weight: 700; }
 .node.is-strike .node-text { text-decoration: line-through; text-decoration-thickness: 1.5px; text-decoration-color: currentColor; }
 
+/* insertion line while dragging between peers */
+.drop-line {
+  position: absolute; left: 0; top: 0; height: 3px; border-radius: 2px; pointer-events: none; z-index: 3;
+  background: var(--accent-2); box-shadow: 0 0 10px var(--accent-soft), 0 0 0 1px var(--bg);
+}
+.drop-line::before {
+  content: ''; position: absolute; top: -3px; left: -6px; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--accent-2); box-shadow: 0 0 0 2px var(--bg);
+}
+.drop-line.side-L::before { left: auto; right: -6px; }
+
 /* ---------- Style bar ---------- */
 .stylebar {
   position: absolute; left: 0; top: 0; z-index: 8;

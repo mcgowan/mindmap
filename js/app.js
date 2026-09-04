@@ -510,6 +510,10 @@
 
   /* ---------- selection ---------- */
   function select(id, { reveal = true } = {}) {
+    if (id !== state.selectedId) {
+      disarmStylebar();
+      if (id && hoveredNodeId === id) armStylebarSoon();
+    }
     if (state.selectedId && nodeEls.has(state.selectedId)) nodeEls.get(state.selectedId).classList.remove('selected');
     state.selectedId = id;
     const n = nodeEls.get(id);
@@ -622,11 +626,10 @@
     if (!txt) return;
     const id = state.editingId;
     e.stopPropagation();
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      commitEdit();
-      if (!e.shiftKey && findNode(state.map.root, id)) { const n = addSibling(id); startEdit(n.id); }
-    } else if (e.key === 'Tab') {
+      commitEdit();                                          // Enter only leaves edit mode
+    } else if (e.key === 'Tab' || (e.key === 'Enter' && e.shiftKey)) {
       e.preventDefault();
       commitEdit();
       if (findNode(state.map.root, id)) { const n = addChild(id); startEdit(n.id); }
@@ -637,6 +640,10 @@
       e.preventDefault(); toggleStyle(id, 'bold');
     } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'x') {
       e.preventDefault(); toggleStyle(id, 'strike');
+    } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'c') {
+      e.preventDefault(); copyStyle(id);
+    } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'v') {
+      e.preventDefault(); pasteStyle(id);
     } else if ((e.metaKey || e.ctrlKey) && ['i', 'u'].includes(e.key.toLowerCase())) {
       e.preventDefault(); // keep contenteditable free of inline markup
     }
@@ -775,10 +782,61 @@
     setTimeout(() => b.classList.remove('flash'), 350);
   }
 
+  /* ---------- style bar: show only after the pointer dwells on the selected node ---------- */
+  const STYLEBAR_DWELL_MS = 500;    // pointer must be perfectly still on the selected node this long
+  const STYLEBAR_GRACE_MS = 300;    // time allowed to cross the gap from the node into the bar
+  let hoveredNodeId = null;
+  let stylebarArmed = false;
+  let armTimer = null;
+  let hideTimer = null;
+
+  function armStylebarSoon() {
+    clearTimeout(armTimer);
+    armTimer = setTimeout(() => {
+      if (hoveredNodeId === state.selectedId && !stylebarArmed) { stylebarArmed = true; updateStyleBar(); }
+    }, STYLEBAR_DWELL_MS);
+  }
+  function disarmStylebar() {
+    clearTimeout(armTimer);
+    clearTimeout(hideTimer);
+    if (stylebarArmed) { stylebarArmed = false; closeStylePop(); updateStyleBar(); }
+  }
+  function scheduleStylebarHide() {
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => {
+      if (hoveredNodeId === state.selectedId || el.stylebar.matches(':hover') || !el.sbPop.hidden) return;
+      disarmStylebar();
+    }, STYLEBAR_GRACE_MS);
+  }
+  el.nodes.addEventListener('mouseover', e => {
+    const n = e.target.closest('.node');
+    if (!n || n.dataset.id === hoveredNodeId) return;
+    hoveredNodeId = n.dataset.id;
+    if (hoveredNodeId === state.selectedId) {
+      clearTimeout(hideTimer);
+      if (!stylebarArmed) armStylebarSoon();
+    }
+  });
+  // any movement restarts the stillness clock
+  el.nodes.addEventListener('mousemove', e => {
+    if (stylebarArmed || hoveredNodeId !== state.selectedId) return;
+    const n = e.target.closest('.node');
+    if (n && n.dataset.id === state.selectedId) armStylebarSoon();
+  });
+  el.nodes.addEventListener('mouseout', e => {
+    const n = e.target.closest('.node');
+    if (!n || (e.relatedTarget && n.contains(e.relatedTarget))) return;
+    if (hoveredNodeId === n.dataset.id) hoveredNodeId = null;
+    clearTimeout(armTimer);
+    if (stylebarArmed) scheduleStylebarHide();
+  });
+  el.stylebar.addEventListener('mouseenter', () => clearTimeout(hideTimer));
+  el.stylebar.addEventListener('mouseleave', () => { if (stylebarArmed) scheduleStylebarHide(); });
+
   function updateStyleBar() {
     const id = state.selectedId;
     const ln = state.layout && id ? state.layout.byId.get(id) : null;
-    const show = !!ln && !state.editingId && !(nodeDrag && nodeDrag.active) && !el.editor.hidden;
+    const show = !!ln && stylebarArmed && !state.editingId && !(nodeDrag && nodeDrag.active) && !el.editor.hidden;
     el.stylebar.hidden = !show;
     if (!show) { closeStylePop(); return; }
     const st = ln.node.style || {};
@@ -805,6 +863,7 @@
   function closeStylePop() {
     el.sbPop.hidden = true;
     $$('.sb-btn.open', el.stylebar).forEach(b => b.classList.remove('open'));
+    if (stylebarArmed && hoveredNodeId !== state.selectedId && !el.stylebar.matches(':hover')) scheduleStylebarHide();
   }
   function openStylePop(kind) {
     const id = state.selectedId;
@@ -855,7 +914,12 @@
     ta.style.height = Math.max(160, ta.scrollHeight + 2) + 'px';
   }
   function setNotesPaneOpen(open, { focus = true } = {}) {
-    if (!el.notesPane) return;
+    if (!el.notesPane) {
+      // No pane in this front-end (tactical): focus whatever notes box the page renders for the node.
+      const ta = open && $('.notes-input');
+      if (ta && focus) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+      return;
+    }
     const before = viewportRect().width;
     el.notesPane.hidden = !open;
     localStorage.setItem(NOTES_PANE_KEY, open ? '1' : '0');
@@ -1036,34 +1100,95 @@
     updateStyleBar();
     moveNodeDrag(e);
   }
+  // Returns { id, zone } where zone is 'before' | 'after' (insert beside the target) or 'onto' (nest under it).
   function dropTargetAt(x, y) {
     const hit = document.elementFromPoint(x, y);
     const n = hit && hit.closest('.node');
     if (!n) return null;
     const id = n.dataset.id;
     if (nodeDrag.subtree.has(id)) return null;               // itself or its own descendants
-    const ln = state.layout.byId.get(nodeDrag.id);
-    if (ln.parent && ln.parent.id === id) return null;      // current parent
-    return id;
+    const target = state.layout.byId.get(id);
+    const dragged = state.layout.byId.get(nodeDrag.id);
+    let zone = 'onto';
+    if (target.parent) {                                     // the root has no peers
+      const r = n.getBoundingClientRect();
+      const rel = (y - r.top) / r.height;
+      if (rel < 0.3) zone = 'before'; else if (rel > 0.7) zone = 'after';
+    }
+    if (zone === 'onto' && dragged.parent && dragged.parent.id === id) return null; // already its child
+    return { id, zone };
+  }
+  let dropLine = null;
+  function showDropLine(t) {
+    if (!dropLine) {
+      dropLine = document.createElement('div');
+      dropLine.className = 'drop-line';
+      el.nodes.appendChild(dropLine);
+    }
+    const ln = state.layout.byId.get(t.id);
+    const p = pos.get(t.id);
+    const y = t.zone === 'before' ? p.y - ln.h / 2 - Layout.V_GAP / 2 : p.y + ln.h / 2 + Layout.V_GAP / 2;
+    dropLine.style.width = ln.w + 'px';
+    dropLine.style.transform = `translate3d(${p.x - ln.w / 2}px, ${y - 1.5}px, 0)`;
+    dropLine.classList.toggle('side-L', ln.side === 'L');
+    dropLine.hidden = false;
+  }
+  function hideDropLine() { if (dropLine) dropLine.hidden = true; }
+  function clearDropHighlight() {
+    const t = nodeDrag && nodeDrag.target;
+    if (t && nodeEls.has(t.id)) nodeEls.get(t.id).classList.remove('drop-target');
+    hideDropLine();
   }
   function moveNodeDrag(e) {
     nodeDrag.ghost.style.transform = `translate(${e.clientX + 14}px, ${e.clientY + 12}px)`;
     const target = dropTargetAt(e.clientX, e.clientY);
-    if (target !== nodeDrag.targetId) {
-      if (nodeDrag.targetId && nodeEls.has(nodeDrag.targetId)) nodeEls.get(nodeDrag.targetId).classList.remove('drop-target');
-      nodeDrag.targetId = target;
-      if (target) nodeEls.get(target).classList.add('drop-target');
+    const key = target ? `${target.id}:${target.zone}` : null;
+    if (key !== nodeDrag.targetKey) {
+      clearDropHighlight();
+      nodeDrag.target = target;
+      nodeDrag.targetKey = key;
+      if (target) {
+        if (target.zone === 'onto') nodeEls.get(target.id).classList.add('drop-target');
+        else showDropLine(target);
+      }
     }
     nodeDrag.ghost.classList.toggle('can-drop', !!target);
   }
   function endNodeDrag(commit) {
-    const { id, targetId, ghost, subtree } = nodeDrag;
+    const { id, target, ghost, subtree } = nodeDrag;
+    clearDropHighlight();
     nodeDrag = null;
     if (ghost) ghost.remove();
     el.viewport.classList.remove('dragging');
     if (subtree) subtree.forEach(sid => { const n = nodeEls.get(sid); if (n) n.classList.remove('dragging'); });
-    if (targetId && nodeEls.has(targetId)) nodeEls.get(targetId).classList.remove('drop-target');
-    if (commit && targetId) reparent(id, targetId); else updateStyleBar();
+    if (commit && target) {
+      if (target.zone === 'onto') reparent(id, target.id);
+      else moveBeside(id, target.id, target.zone === 'after');
+    } else updateStyleBar();
+  }
+  /** Move a node (with its branch) to sit right before/after another node, under that node's parent. */
+  function moveBeside(id, targetId, after) {
+    const src = findNode(state.map.root, id);
+    const tgt = findNode(state.map.root, targetId);
+    if (!src || !tgt || !src.parent || !tgt.parent) return;
+    if (findNode(src.node, targetId)) return;                // would create a cycle
+    const oldParent = src.parent, oldIndex = src.index, newParent = tgt.parent;
+    const toRoot = newParent === state.map.root;
+    let index = tgt.index + (after ? 1 : 0);
+    if (newParent === oldParent) {
+      if (oldIndex < index) index--;
+      const sameSide = !toRoot || (src.node.side || 'R') === (tgt.node.side || 'R');
+      if (index === oldIndex && sameSide) return;            // nothing would change
+    }
+    pushUndo();
+    oldParent.children.splice(oldIndex, 1);
+    if (toRoot) {
+      src.node.side = tgt.node.side || 'R';
+      if (src.node.color === undefined) src.node.color = pickColor();
+    } else { delete src.node.side; delete src.node.color; }
+    newParent.collapsed = false;
+    newParent.children.splice(index, 0, src.node);
+    persist(); relayout(); select(id);
   }
   function reparent(id, targetId) {
     const src = findNode(state.map.root, id);
@@ -1094,7 +1219,7 @@
       if (state.editingId) commitEdit();
       select(id, { reveal: false });
       if (id !== state.map.root.id) {
-        nodeDrag = { id, x: e.clientX, y: e.clientY, active: false, ghost: null, targetId: null, subtree: null };
+        nodeDrag = { id, x: e.clientX, y: e.clientY, active: false, ghost: null, target: null, targetKey: null, subtree: null };
         el.viewport.setPointerCapture(e.pointerId);
       }
       return;
@@ -1162,14 +1287,14 @@
   const SHORTCUTS = [
     ['Create & edit', [
       [['Tab'], 'Add a child'],
-      [['Enter'], 'Add a sibling below'],
-      [['Shift', 'Enter'], 'Add a sibling above'],
+      [['Shift', 'Enter'], 'Add a child'],
+      [['Enter'], 'Add a peer below'],
+      [['F2', 'Space'], 'Edit the selected node'],
       [['Type'], 'Replace the selected node’s text'],
-      [['Space'], 'Edit the selected node'],
-      [['Enter'], 'Commit and start the next sibling (while editing)'],
-      [['Tab'], 'Commit and start a child (while editing)'],
-      [['Shift', 'Enter'], 'Commit only (while editing)'],
-      [['Esc'], 'Stop editing'],
+      [['Enter'], 'Finish editing (while editing)'],
+      [['Tab'], 'Finish and start a child (while editing)'],
+      [['Shift', 'Enter'], 'Finish and start a child (while editing)'],
+      [['Esc'], 'Finish editing'],
       [['⌫'], 'Delete the node and its branch'],
       [[MOD, 'I'], 'Open the notes pane for the node'],
       [['Esc'], 'Leave the notes pane (while writing notes)'],
@@ -1184,7 +1309,7 @@
       [[ALT, '↑ ↓'], 'Reorder among siblings'],
       [[MOD, '/'], 'Collapse or expand a branch'],
       [[MOD, 'Shift', '← →'], 'Move a first-level branch to the other side'],
-      [['Drag'], 'Drop a node on another to move it there (with its branch)'],
+      [['Drag'], 'Drop on a node to nest under it, or between nodes to reorder'],
       [[MOD, 'Z'], 'Undo'],
       [[MOD, 'Shift', 'Z'], 'Redo'],
     ]],
@@ -1241,8 +1366,8 @@
     }
 
     // selection-based
-    if (key === 'Tab') { e.preventDefault(); const n = addChild(id); if (n) startEdit(n.id); return; }
-    if (key === 'Enter') { e.preventDefault(); const n = addSibling(id, e.shiftKey); if (n) startEdit(n.id); return; }
+    if (key === 'Tab' || (key === 'Enter' && e.shiftKey)) { e.preventDefault(); const n = addChild(id); if (n) startEdit(n.id); return; }
+    if (key === 'Enter') { e.preventDefault(); const n = addSibling(id); if (n) startEdit(n.id); return; }
     if (key === 'Backspace' || key === 'Delete') { e.preventDefault(); deleteNode(id); return; }
     if (key === ' ' || key === 'F2') { e.preventDefault(); startEdit(id); return; }
     if (mod && key === '/') { e.preventDefault(); toggleCollapse(id); return; }

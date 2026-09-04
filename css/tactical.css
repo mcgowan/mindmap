@@ -216,6 +216,9 @@ body { background: var(--bg); color: var(--text); }
 .drag-ghost.can-drop { border-color: var(--amber); }
 .drag-ghost .ghost-count { border-radius: 0; }
 
+.drop-line { border-radius: 0; background: var(--amber); box-shadow: 0 0 10px rgba(255, 176, 46, .5); }
+.drop-line::before { border-radius: 0; background: var(--amber); box-shadow: 0 0 0 2px #03110a; }
+
 /* ---------- style bar ---------- */
 .stylebar { border-radius: 0; background: var(--bg-2); border-color: var(--phos); box-shadow: 0 0 16px var(--phos-faint); }
 .stylebar .sb-btn { border-radius: 0; color: var(--muted); }

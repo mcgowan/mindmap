@@ -33,9 +33,12 @@ Every mutation is persisted immediately; the view (pan/zoom) is saved per map wi
 
 ## Keyboard
 
-Press `?` inside the editor for the full list. The essentials: `Tab` child, `Enter` sibling,
-type to edit, `Backspace` delete, arrows to move, `⌘/` collapse, `⌘Z` undo, `⌘0` fit.
-Drag any node onto another node to move it (and its branch) there.
+Press `?` inside the editor for the full list. The essentials: `Tab` or `Shift+Enter` child, `Enter` peer,
+`F2` or `Space` to edit (or just type), `Enter` finishes editing, `Backspace` delete, arrows to move,
+`⌘/` collapse, `⌘Z` undo, `⌘0` fit.
+Drag any node onto the middle of another node to nest it there (with its branch), or onto the top or
+bottom edge of a node to drop it before or after that node, which reorders peers or moves it into
+another parent at a chosen position.
 
 ## Theme
 
