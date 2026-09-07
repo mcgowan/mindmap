@@ -5,6 +5,8 @@
 const Layout = (() => {
   const H_GAP = 72;   // horizontal distance between a parent edge and a child edge
   const V_GAP = 14;   // vertical gap between sibling subtrees
+  const MIN_NODE_W = 80;   // custom-width clamp bounds (px)
+  const MAX_NODE_W = 800;
 
   const PALETTE = [
     '#5b8def', // blue
@@ -23,8 +25,15 @@ const Layout = (() => {
 
   const depthClass = d => (d === 0 ? 'depth-0' : d === 1 ? 'depth-1' : 'depth-n');
 
-  function measure(text, depth, bold = false) {
-    const key = depthClass(depth) + (bold ? ' b ' : ' ') + text;
+  /** Valid custom width clamped to bounds, or undefined for automatic sizing. */
+  function clampWidth(w) {
+    if (!Number.isFinite(w)) return undefined;
+    return Math.min(MAX_NODE_W, Math.max(MIN_NODE_W, w));
+  }
+
+  function measure(text, depth, bold = false, width, marks) {
+    const sig = Array.isArray(marks) && marks.length ? JSON.stringify(marks) : '';
+    const key = depthClass(depth) + (bold ? ' b ' : ' ') + (width !== undefined ? width : 'auto') + '|' + sig + '|' + text;
     let m = cache.get(key);
     if (m) return m;
     if (!measureEl) {
@@ -32,10 +41,17 @@ const Layout = (() => {
       measureText = measureEl.querySelector('.node-text');
     }
     measureEl.className = 'node measure ' + depthClass(depth) + (bold ? ' is-bold' : '');
-    measureText.textContent = text || ' ';
+    // pin the width so only the wrapped height is discovered; reset so auto calls stay auto
+    measureEl.style.width = width !== undefined ? width + 'px' : '';
+    measureEl.style.maxWidth = width !== undefined ? 'none' : '';
+    // Marks / Links are defined by app.js (loaded after this file) — look them up at call time
+    const linked = !!(window.Links && window.Links.find(text).length);
+    if ((sig || linked) && window.Marks) window.Marks.renderRuns(measureText, text, marks); else measureText.textContent = text || ' ';
     const r = measureEl.getBoundingClientRect();
     // +1 guards against sub-pixel rounding that would otherwise wrap the last letter
-    m = { w: Math.ceil(r.width) + 1, h: Math.ceil(r.height) };
+    m = width !== undefined
+      ? { w: width, h: Math.ceil(r.height) }
+      : { w: Math.ceil(r.width) + 1, h: Math.ceil(r.height) };
     cache.set(key, m);
     return m;
   }
@@ -51,7 +67,7 @@ const Layout = (() => {
     const byId = new Map();
 
     function build(node, depth, parent, side, color) {
-      const size = measure(node.text, depth, !!(node.style && node.style.bold));
+      const size = measure(node.text, depth, !!(node.style && node.style.bold), clampWidth(node.width), node.marks);
       const ln = {
         id: node.id, node, depth, parent, side, color,
         w: size.w, h: size.h, x: 0, y: 0,
@@ -147,5 +163,5 @@ const Layout = (() => {
     ].join('');
   }
 
-  return { compute, linkPoints, linkPath, clearCache: () => cache.clear(), PALETTE, H_GAP, V_GAP };
+  return { compute, linkPoints, linkPath, clampWidth, clearCache: () => cache.clear(), PALETTE, H_GAP, V_GAP, MIN_NODE_W, MAX_NODE_W };
 })();

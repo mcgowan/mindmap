@@ -174,6 +174,7 @@
     redo: [],
     view: { x: 0, y: 0, z: 1 },
     pendingEditRoot: false,
+    saveFailed: false,
   };
   const nodeEls = new Map();   // id -> .node element
   const linkEls = new Map();   // child id -> <path>
@@ -181,11 +182,19 @@
 
   /* ================================================================ LIBRARY */
   async function showHome() {
+    if (state.saveFailed && state.map) {
+      if (!confirm('Unsaved changes will be lost. Leave this map?')) {
+        location.hash = `#/map/${state.map.id}`;
+        return;
+      }
+      setStatus('saved');
+    }
     if (state.editingId) commitEdit();
     state.map = null;
     el.editor.hidden = true;
     el.home.hidden = false;
     el.help.hidden = true;
+    updateDocumentTitle();
     await renderLibrary();
   }
 
@@ -220,6 +229,7 @@
     const list = await Store.list();
     const shown = q ? list.filter(m => m.title.toLowerCase().includes(q)) : list;
     el.mapCount.textContent = list.length ? `${list.length} map${list.length === 1 ? '' : 's'}` : '';
+    Usage.refresh();
     el.empty.hidden = list.length > 0;
     el.cards.innerHTML = '';
     if (q && !shown.length) {
@@ -324,6 +334,8 @@
 
   /* ================================================================ EDITOR */
   async function openEditor(id) {
+    // Re-routing to the open map (e.g. the leave guard restoring the hash) must not reload the stored copy.
+    if (state.map && state.map.id === id && !el.editor.hidden) return;
     const map = await Store.get(id);
     if (!map) { location.hash = '#/'; return; }
     if (state.editingId) commitEdit();
@@ -338,6 +350,7 @@
     el.home.hidden = true;
     el.editor.hidden = false;
     el.title.value = map.title;
+    updateDocumentTitle(map.title);
     if (ensureBranchColors()) Store.save(map, { touch: false });
     setNotesPaneOpen(localStorage.getItem(NOTES_PANE_KEY) === '1', { focus: false });
     setStatus('saved');
@@ -353,26 +366,65 @@
 
   /* ---------- persistence ---------- */
   let saveTimer = null, viewTimer = null;
+
+  /* Storage usage against a nominal 5 MiB per-origin localStorage budget (no quota API exists). */
+  const Usage = (() => {
+    const BUDGET = 5 * 1024 * 1024;
+    const WARN = 0.8;
+    const format = bytes => bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    function refresh() {
+      const used = Store.usage();
+      const pct = used / BUDGET;
+      const warn = pct >= WARN;
+      const percent = Math.round(pct * 100);
+      const label = `${format(used)} / 5 MB`;
+      const title = warn ? `Storage nearly full — ${percent}% used` : `${percent}% of local storage used`;
+      $$('[data-storage-usage]').forEach(node => {
+        node.textContent = label;
+        node.title = title;
+        node.classList.toggle('is-warn', warn);
+      });
+      if (warn) document.body.dataset.storageWarn = '1'; else delete document.body.dataset.storageWarn;
+    }
+    return { BUDGET, refresh };
+  })();
+
+  const STATUS_LABEL = { saved: 'All changes saved', saving: 'Saving…', failed: 'Not saved — storage full' };
   function setStatus(s) {
     el.status.classList.toggle('is-saved', s === 'saved');
     el.status.classList.toggle('is-saving', s === 'saving');
-    $('.label', el.status).textContent = s === 'saved' ? 'All changes saved' : 'Saving…';
+    el.status.classList.toggle('is-failed', s === 'failed');
+    $('.label', el.status).textContent = STATUS_LABEL[s] ?? STATUS_LABEL.saving;
+    state.saveFailed = s === 'failed';
   }
   function persist() {
     if (!state.map) return;
     setStatus('saving');
     clearTimeout(saveTimer);
+    const map = state.map; // showHome() may null state.map before the debounce fires
     saveTimer = setTimeout(async () => {
-      await Store.save(state.map);
-      setStatus('saved');
+      try {
+        await Store.save(map);
+        if (state.map === map) setStatus('saved');
+      } catch (e) {
+        if (state.map === map) setStatus('failed');
+        else showToast(`Not saved — storage full. The last change to “${map.title}” was lost.`);
+      }
+      Usage.refresh();
     }, 120);
   }
   function persistView() {
     if (!state.map) return;
     clearTimeout(viewTimer);
-    viewTimer = setTimeout(() => {
+    viewTimer = setTimeout(async () => {
       state.map.view = { ...state.view };
-      Store.save(state.map, { touch: false });
+      try {
+        await Store.save(state.map, { touch: false });
+        if (state.saveFailed) setStatus('saved'); // the whole document just landed, so the failed edit is now stored
+        Usage.refresh();
+      } catch (e) {
+        // view-only save: a full store is not worth alarming over
+      }
     }, 400);
   }
 
@@ -431,7 +483,8 @@
         n = document.createElement('div');
         n.className = 'node';
         n.dataset.id = ln.id;
-        n.innerHTML = '<span class="node-text"></span><button class="badge" tabindex="-1" title="Collapse / expand"></button><i class="note-mark"></i>';
+        n.innerHTML = '<span class="node-text"></span><button class="badge" tabindex="-1" title="Collapse / expand"></button><i class="note-mark"></i>'
+          + '<div class="resize-handle" data-edge="L"></div><div class="resize-handle" data-edge="R"></div>';
         nodeEls.set(ln.id, n);
         el.nodes.appendChild(n);
       }
@@ -467,6 +520,7 @@
   }
 
   function tick(now) {
+    if (!animating) return;  // settled/cancelled — a stray scheduled frame must not re-apply stale positions
     const t = clamp((now - animStart) / ANIM_MS, 0, 1);
     applyFrame(1 - Math.pow(1 - t, 3));
     if (t < 1 && animating) requestAnimationFrame(tick); else animating = false;
@@ -504,7 +558,9 @@
     n.style.borderColor = st.bg || '';
     n.style.color = st.color || (st.bg ? contrastText(st.bg) : '');
     n.style.width = ln.w + 'px';
-    if (ln.id !== state.editingId) $('.node-text', n).textContent = ln.node.text;
+    // a custom width may exceed the CSS auto cap (max-width: 300px)
+    n.style.maxWidth = Layout.clampWidth(ln.node.width) !== undefined ? 'none' : '';
+    if (ln.id !== state.editingId) Marks.renderRuns($('.node-text', n), ln.node.text, ln.node.marks);
     $('.badge', n).textContent = ln.collapsed ? ln.hiddenCount : '';
   }
 
@@ -539,10 +595,9 @@
     txt.spellcheck = false;
     if (replaceWith !== null) {
       found.node.text = replaceWith;
-      txt.textContent = replaceWith;
-    } else {
-      txt.textContent = found.node.text;
+      delete found.node.marks;                      // type-to-replace discards the old text and its marks
     }
+    Marks.renderRuns(txt, found.node.text, found.node.marks);
     txt.focus();
     const range = document.createRange();
     range.selectNodeContents(txt);
@@ -550,7 +605,9 @@
     const sel = window.getSelection();
     sel.removeAllRanges();
     sel.addRange(range);
+    document.addEventListener('selectionchange', onEditSelectionChange);
     if (replaceWith !== null) relayout();
+    updateStyleBar();
   }
 
   function commitEdit({ cancel = false } = {}) {
@@ -560,10 +617,18 @@
     const txt = n ? $('.node-text', n) : null;
     const found = findNode(state.map.root, id);
     state.editingId = null;
+    document.removeEventListener('selectionchange', onEditSelectionChange);
     if (n) { n.classList.remove('editing'); txt.contentEditable = 'false'; }
     if (!found) return;
     const { node, parent } = found;
-    let text = cancel ? state.editStartText : (txt ? txt.textContent : node.text).replace(/\s+/g, ' ').trim();
+    const snapNode = findNode(JSON.parse(state.editSnapshot), id);
+    const before = snapNode ? snapNode.node : { text: state.editStartText };
+    const raw = txt ? Marks.serializeDom(txt) : { text: node.text, marks: node.marks };
+    let { text, marks } = Marks.remapWhitespace(raw.text, raw.marks);
+    if (cancel) {                                   // dormant path: no trigger today, kept correct for a future cancel gesture
+      text = before.text; marks = before.marks || [];
+      if (before.style) node.style = { ...before.style }; else delete node.style;
+    }
     const wasNew = state.newNodeId === id;
     state.newNodeId = null;
 
@@ -579,11 +644,15 @@
         select(parent.id);
         return;
       }
-      text = state.editStartText || (parent ? 'Untitled' : 'Central idea');
+      // empty fallback restores the previous text and its marks; node-level style changes from this session stay
+      text = before.text || (parent ? 'Untitled' : 'Central idea');
+      marks = text === before.text ? (before.marks || []) : [];
     }
     node.text = text;
-    if (txt) txt.textContent = text;
-    if (text !== state.editStartText) {
+    if (marks.length) node.marks = marks; else delete node.marks;
+    if (txt) Marks.renderRuns(txt, text, node.marks);
+    const changed = text !== before.text || JSON.stringify(node.marks || []) !== JSON.stringify(before.marks || []) || JSON.stringify(node.style || {}) !== JSON.stringify(before.style || {});
+    if (changed) {
       if (!wasNew) pushUndo(state.editSnapshot);
       syncTitleFromRoot();
       persist();
@@ -597,7 +666,74 @@
     if (!state.map.titleCustom) {
       state.map.title = state.map.root.text;
       el.title.value = state.map.title;
+      updateDocumentTitle(state.map.root.text);
     }
+  }
+
+  // Reads the source text, not state.map.title: the input handler coerces blanks to 'Untitled map'.
+  function updateDocumentTitle(raw) {
+    const t = (raw ?? '').trim();
+    document.title = t ? `${t} · Mindmap` : 'Mindmap';
+  }
+
+  /* ---------- marks while editing: the selection decides between a range mark and the node-level style ---------- */
+  function selectionOffsets(txt) {
+    const sel = window.getSelection();
+    const len = txt.textContent.length;
+    if (!sel || !sel.rangeCount || !txt.contains(sel.anchorNode) || !txt.contains(sel.focusNode)) return { s: 0, e: 0, whole: false };
+    const r = sel.getRangeAt(0);
+    const pre = document.createRange();
+    pre.selectNodeContents(txt);
+    pre.setEnd(r.startContainer, r.startOffset);
+    const s = pre.toString().length;
+    const e = s + r.toString().length;
+    return { s, e, whole: s === 0 && e === len && len > 0 };
+  }
+  function restoreSelection(txt, s, e) {
+    const range = document.createRange();
+    let acc = 0, startSet = false, endSet = false;
+    const walk = node => {
+      for (const ch of node.childNodes) {
+        if (ch.nodeType === 3) {
+          const end = acc + ch.length;
+          if (!startSet && s <= end) { range.setStart(ch, s - acc); startSet = true; }
+          if (!endSet && e <= end) { range.setEnd(ch, e - acc); endSet = true; return true; }
+          acc = end;
+        } else if (walk(ch)) return true;
+      }
+      return false;
+    };
+    if (!walk(txt)) { range.selectNodeContents(txt); if (!startSet) range.collapse(false); else range.setEnd(txt, txt.childNodes.length); }
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  const MARK_KEY = { bold: 'b', italic: 'i', underline: 'u', strike: 'k' };
+  /** key: bold | italic | underline | strike | color (value = '#hex' | ''). */
+  function applyMarkAction(id, key, value) {
+    const found = findNode(state.map.root, id);
+    const n = nodeEls.get(id);
+    if (!found || !n || state.editingId !== id) return;
+    const txt = $('.node-text', n);
+    const { text } = found.node;
+    let { s, e, whole } = selectionOffsets(txt);
+    // a whole-text selection whose inline mark already covers everything acts on that mark (toggle off / recolour) rather than the node layer
+    const allFlags = whole ? Marks.flagsAt(found.node.marks, 0, text.length, text.length) : null;
+    const inlineCoversAll = !!allFlags && (key === 'color' ? !!allFlags.c : allFlags[MARK_KEY[key]]);
+    if ((s === e || whole) && !inlineCoversAll) {
+      if (key === 'bold' || key === 'strike') { toggleStyle(id, key); return; }
+      if (key === 'color') { setStyle(id, { color: value }); return; }
+      s = 0; e = text.length;                       // italic / underline have no node-level form: mark the whole text
+    }
+    const marks = key === 'color'
+      ? Marks.apply(found.node.marks, s, e, { c: value }, text.length)
+      : Marks.toggle(found.node.marks, s, e, MARK_KEY[key], text.length);
+    if (marks.length) found.node.marks = marks; else delete found.node.marks;
+    const sel = selectionOffsets(txt);
+    Marks.renderRuns(txt, text, found.node.marks);
+    restoreSelection(txt, sel.s, sel.e);
+    relayout();
+    updateStyleBar();
   }
 
   el.nodes.addEventListener('input', e => {
@@ -605,11 +741,71 @@
     if (!txt || !state.editingId) return;
     const found = findNode(state.map.root, state.editingId);
     if (!found) return;
-    found.node.text = txt.textContent.replace(/\n/g, ' ');
+    if (e.inputType === 'historyUndo' || e.inputType === 'historyRedo') {
+      // Chromium's history beforeinput is not cancelable: undo the replay by re-rendering the model as of the last real input
+      Marks.renderRuns(txt, found.node.text, found.node.marks);
+      restoreSelection(txt, found.node.text.length, found.node.text.length);
+      return;
+    }
+    const { text, marks } = Marks.serializeDom(txt);   // the editor DOM is the source of truth while editing
+    found.node.text = text;
+    if (marks.length) found.node.marks = marks; else delete found.node.marks;
+    if (!e.isComposing) canonicalizeEditor(txt, found.node);
     relayout();
     ensureVisible(state.editingId);
     renderNotesPane();
   });
+  /** Browser typing-style spans / dropped markup are ignored by serializeDom — re-render so what is shown matches the model.
+   *  Also re-renders when typing has moved a link boundary, so link styling tracks the text live. */
+  function canonicalizeEditor(txt, node) {
+    const foreign = [...txt.querySelectorAll('*')].some(x => !(x.tagName === 'SPAN' && x.classList.contains('m-run')));
+    if (!foreign && !editorLinksStale(txt, node.text)) return;
+    const { s, e } = selectionOffsets(txt);
+    Marks.renderRuns(txt, node.text, node.marks);
+    restoreSelection(txt, s, e);
+  }
+  function editorLinksStale(txt, text) {
+    // a mark boundary inside a link splits it over several spans sharing one data-href — compare per link, not per span
+    const dom = [];
+    for (const a of txt.querySelectorAll('.m-a')) {
+      const last = dom[dom.length - 1];
+      if (last && last.href === a.dataset.href && last.el.nextSibling === a) { last.text += a.textContent; last.el = a; }
+      else dom.push({ href: a.dataset.href, text: a.textContent, el: a });
+    }
+    const want = findLinks(text);
+    return dom.length !== want.length || dom.some((d, i) => d.href !== want[i].href || d.text !== want[i].href);
+  }
+  // IME: the last input arrives while composing, so canonicalise once composition ends
+  el.nodes.addEventListener('compositionend', e => {
+    const txt = e.target.closest('.node-text[contenteditable="true"]');
+    const found = txt && state.editingId && findNode(state.map.root, state.editingId);
+    if (!found) return;
+    const { text, marks } = Marks.serializeDom(txt);
+    found.node.text = text;
+    if (marks.length) found.node.marks = marks; else delete found.node.marks;
+    canonicalizeEditor(txt, found.node);
+    relayout();
+  });
+  // native undo/redo would replay detached run spans from earlier sessions into the editor — keep the browser history out of it
+  el.nodes.addEventListener('beforeinput', e => {
+    if (!state.editingId || !e.target.closest('.node-text[contenteditable="true"]')) return;
+    if (e.inputType === 'historyUndo' || e.inputType === 'historyRedo') e.preventDefault();
+  });
+  /** Cmd/Ctrl+Z while editing: back to how the node looked when this edit began (text, marks, style), staying in edit mode. */
+  function revertEditSession(id) {
+    const found = findNode(state.map.root, id);
+    const n = nodeEls.get(id);
+    const snap = findNode(JSON.parse(state.editSnapshot), id);
+    if (!found || !n || !snap) return;
+    const txt = $('.node-text', n);
+    found.node.text = snap.node.text;
+    if (snap.node.marks) found.node.marks = snap.node.marks; else delete found.node.marks;
+    if (snap.node.style) found.node.style = { ...snap.node.style }; else delete found.node.style;
+    Marks.renderRuns(txt, found.node.text, found.node.marks);
+    restoreSelection(txt, found.node.text.length, found.node.text.length);
+    relayout();
+    updateStyleBar();
+  }
   el.nodes.addEventListener('paste', e => {
     if (!e.target.closest('.node-text[contenteditable="true"]')) return;
     e.preventDefault();
@@ -637,15 +833,19 @@
       e.preventDefault();
       commitEdit();
     } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') {
-      e.preventDefault(); toggleStyle(id, 'bold');
+      e.preventDefault(); applyMarkAction(id, 'bold');
+    } else if ((e.metaKey || e.ctrlKey) && (e.key.toLowerCase() === 'z' || e.key.toLowerCase() === 'y')) {
+      e.preventDefault(); if (e.key.toLowerCase() === 'z' && !e.shiftKey) revertEditSession(id);   // redo: no-op
     } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'x') {
-      e.preventDefault(); toggleStyle(id, 'strike');
+      e.preventDefault(); applyMarkAction(id, 'strike');
     } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'c') {
       e.preventDefault(); copyStyle(id);
     } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'v') {
       e.preventDefault(); pasteStyle(id);
-    } else if ((e.metaKey || e.ctrlKey) && ['i', 'u'].includes(e.key.toLowerCase())) {
-      e.preventDefault(); // keep contenteditable free of inline markup
+    } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'i') {
+      e.preventDefault(); applyMarkAction(id, 'italic');
+    } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'u') {
+      e.preventDefault(); applyMarkAction(id, 'underline');
     }
   });
 
@@ -711,6 +911,45 @@
     found.node.collapsed = !found.node.collapsed;
     persist(); relayout(); select(id);
   }
+  function copyNode(id) {
+    const found = findNode(state.map.root, id);
+    if (!found) return;
+    const outline = outlineText(found.node);
+    const at = Date.now();
+    writeNodeClip(found.node, outline, at);                  // optimistic: outline recorded; no map change, no undo step
+    const write = navigator.clipboard && navigator.clipboard.writeText
+      ? navigator.clipboard.writeText(outline)
+      : Promise.reject(new Error('clipboard API unavailable'));
+    write.catch(() => {
+      if (!nodeClipMem || nodeClipMem.at !== at) return;   // a newer copy already replaced this payload
+      writeNodeClip(nodeClipMem.node, undefined, at);        // same sanitized subtree and `at`, minus the fingerprint
+      showToast("Couldn't write to the system clipboard");
+    });
+  }
+  /** One undoable append of already-sanitized clip nodes; selects the first. */
+  function appendClipNodes(found, clipNodes) {
+    pushUndo();
+    const made = clipNodes.map(cloneWithNewIds);
+    found.node.collapsed = false;
+    for (const n of made) {
+      if (!found.parent) { n.side = chooseSide(); n.color = pickColor(); }   // reads root.children: push one at a time so successive nodes balance
+      found.node.children.push(n);
+    }
+    persist(); relayout(); select(made[0].id);
+    return made;
+  }
+  function pasteNode(targetId) {
+    const clip = readNodeClip();
+    const found = findNode(state.map.root, targetId);
+    if (!clip || !found) return;
+    return appendClipNodes(found, [clip.node])[0];
+  }
+  function pasteText(targetId, roots) {
+    const found = findNode(state.map.root, targetId);
+    if (!found || !roots.length) return;
+    if (countNodes({ children: roots }) - 1 > PASTE_NODE_LIMIT) { showToast(`Paste exceeds the ${PASTE_NODE_LIMIT}-node limit`); return; }   // synthetic parent, minus itself
+    return appendClipNodes(found, roots);
+  }
   function moveSibling(id, dir) {
     const found = findNode(state.map.root, id);
     if (!found || !found.parent) return;
@@ -732,17 +971,245 @@
     persist(); relayout(); select(id);
   }
 
+  /* ---------- inline marks: offset runs over node.text ---------- */
+  // Run: { s, e, b?, i?, u?, k?, c? } — half-open [s, e) code-unit offsets; only truthy flags are stored.
+  const MARK_FLAGS = ['b', 'i', 'u', 'k'];
+  const MARK_CLASS = { b: 'm-b', i: 'm-i', u: 'm-u', k: 'm-k' };
+  const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+
+  function markFlags(run) {
+    const f = {};
+    for (const k of MARK_FLAGS) if (run[k] === true) f[k] = true;
+    if (typeof run.c === 'string' && HEX_COLOR.test(run.c)) f.c = run.c.toLowerCase();
+    return f;
+  }
+  const sameFlags = (a, b) => MARK_FLAGS.every(k => !!a[k] === !!b[k]) && (a.c || '') === (b.c || '');
+  const hasFlags = f => MARK_FLAGS.some(k => f[k]) || !!f.c;
+
+  /** Sorted, disjoint, merged, in-range runs; anything malformed is dropped or clamped. Text is never touched. */
+  function normalizeMarks(marks, len) {
+    if (!Array.isArray(marks) || !Number.isFinite(len) || len <= 0) return [];
+    // flatten to per-boundary events so overlapping runs resolve to disjoint segments with merged flags
+    const cuts = new Set([0, len]);
+    const runs = [];
+    for (const r of marks) {
+      if (!r || typeof r !== 'object') continue;
+      const s = Math.max(0, Math.min(len, Math.floor(Number(r.s))));
+      const e = Math.max(0, Math.min(len, Math.floor(Number(r.e))));
+      if (!Number.isFinite(s) || !Number.isFinite(e) || s >= e) continue;
+      const f = markFlags(r);
+      if (!hasFlags(f)) continue;
+      runs.push({ s, e, f });
+      cuts.add(s); cuts.add(e);
+    }
+    if (!runs.length) return [];
+    const bounds = [...cuts].sort((a, b) => a - b);
+    const out = [];
+    for (let i = 0; i < bounds.length - 1; i++) {
+      const s = bounds[i], e = bounds[i + 1];
+      const f = {};
+      for (const r of runs) if (r.s <= s && r.e >= e) { for (const k of MARK_FLAGS) if (r.f[k]) f[k] = true; if (r.f.c) f.c = r.f.c; }  // later runs win on color
+      if (!hasFlags(f)) continue;
+      const prev = out[out.length - 1];
+      if (prev && prev.e === s && sameFlags(prev, f)) prev.e = e; else out.push({ s, e, ...f });
+    }
+    return out;
+  }
+
+  /** Set (patch.b/i/u/k = true|false, patch.c = '#hex' | '') over [s, e). */
+  function applyMarks(marks, s, e, patch, len) {
+    const base = normalizeMarks(marks, len);
+    s = Math.max(0, Math.min(len, s)); e = Math.max(0, Math.min(len, e));
+    if (s >= e) return base;
+    const out = [];
+    for (const r of base) {                       // keep what lies outside [s, e)
+      if (r.e <= s || r.s >= e) { out.push(r); continue; }
+      if (r.s < s) out.push({ ...r, e: s });
+      if (r.e > e) out.push({ ...r, s: e });
+    }
+    // rebuild the inside from the old coverage plus the patch
+    const cuts = new Set([s, e]);
+    for (const r of base) { if (r.s > s && r.s < e) cuts.add(r.s); if (r.e > s && r.e < e) cuts.add(r.e); }
+    const bounds = [...cuts].sort((a, b) => a - b);
+    for (let i = 0; i < bounds.length - 1; i++) {
+      const a = bounds[i], b = bounds[i + 1];
+      const cover = base.find(r => r.s <= a && r.e >= b);
+      const f = cover ? markFlags(cover) : {};
+      for (const k of MARK_FLAGS) if (k in patch) { if (patch[k]) f[k] = true; else delete f[k]; }
+      if ('c' in patch) { if (patch.c && HEX_COLOR.test(patch.c)) f.c = patch.c.toLowerCase(); else delete f.c; }
+      if (hasFlags(f)) out.push({ s: a, e: b, ...f });
+    }
+    return normalizeMarks(out, len);
+  }
+
+  /** Flags carried by every character of [s, e); c only when uniform. */
+  function marksAt(marks, s, e, len) {
+    const base = normalizeMarks(marks, len);
+    const f = { b: false, i: false, u: false, k: false, c: '' };
+    if (s >= e) return f;
+    let covered = 0, color = null;
+    const all = { b: true, i: true, u: true, k: true };
+    for (const r of base) {
+      const a = Math.max(r.s, s), b = Math.min(r.e, e);
+      if (a >= b) continue;
+      covered += b - a;
+      for (const k of MARK_FLAGS) if (!r[k]) all[k] = false;
+      color = color === null ? (r.c || '') : (color === (r.c || '') ? color : '');
+    }
+    if (covered !== e - s) return f;           // gaps carry nothing
+    for (const k of MARK_FLAGS) f[k] = all[k];
+    f.c = color || '';
+    return f;
+  }
+
+  function toggleMarks(marks, s, e, key, len) {
+    const on = marksAt(marks, s, e, len)[key];
+    return applyMarks(marks, s, e, { [key]: !on }, len);
+  }
+
+  /** text.replace(/\s+/g, ' ').trim() with runs remapped through the removed characters. */
+  function remapWhitespace(text, marks) {
+    const base = normalizeMarks(marks, text.length);
+    const map = new Array(text.length + 1);   // old offset → new offset
+    let out = '', pendingSpace = false;
+    for (let i = 0; i < text.length; i++) {
+      if (/\s/.test(text[i])) { map[i] = out.length; if (out.length) pendingSpace = true; continue; }
+      if (pendingSpace) { out += ' '; pendingSpace = false; }
+      map[i] = out.length;
+      out += text[i];
+    }
+    map[text.length] = out.length;
+    // a removed char maps to where the next kept char lands, so runs never grow
+    const remapped = base.map(r => ({ ...r, s: map[r.s], e: map[r.e] }));
+    return { text: out, marks: normalizeMarks(remapped, out.length) };
+  }
+
+  /** Project (text, marks) into a container as text nodes and <span class="m-*"> runs — DOM APIs only, never innerHTML.
+   *  Links derived from the text split the runs too (class m-a + data-href); the hover hint is off inside a contenteditable. */
+  function renderRuns(container, text, marks, { linkHints = !container.isContentEditable } = {}) {
+    text = typeof text === 'string' ? text : '';
+    const runs = normalizeMarks(marks, text.length);
+    const links = findLinks(text);
+    if (!runs.length && !links.length) { container.replaceChildren(document.createTextNode(text)); return; }
+    const cuts = new Set([0, text.length]);
+    for (const r of runs) { cuts.add(r.s); cuts.add(r.e); }
+    for (const l of links) { cuts.add(l.s); cuts.add(l.e); }
+    const bounds = [...cuts].sort((a, b) => a - b);
+    const nodes = [];
+    for (let i = 0; i < bounds.length - 1; i++) {
+      const s = bounds[i], e = bounds[i + 1];
+      const run = runs.find(r => r.s <= s && r.e >= e);
+      const link = links.find(l => l.s <= s && l.e >= e);
+      if (!run && !link) { nodes.push(document.createTextNode(text.slice(s, e))); continue; }
+      const span = document.createElement('span');
+      const cls = ['m-run'];
+      if (run) for (const k of MARK_FLAGS) if (run[k]) cls.push(MARK_CLASS[k]);
+      if (link) {
+        cls.push('m-a');
+        span.dataset.href = link.href;
+        if (linkHints) span.title = `${MOD}+click to open link`;
+      }
+      span.className = cls.join(' ');
+      if (run && run.c) span.style.color = run.c;
+      span.textContent = text.slice(s, e);
+      nodes.push(span);
+    }
+    container.replaceChildren(...nodes);
+  }
+
+  /** Inverse of renderRuns over a (possibly browser-mutated) contenteditable: flags come only from our m-* classes / validated color. */
+  function serializeDom(container) {
+    let text = '';
+    const marks = [];
+    const BLOCK = /^(BR|DIV|P|LI)$/;
+    const flagsOf = node => {
+      const f = {};
+      for (let n = node.parentNode; n && n !== container; n = n.parentNode) {
+        if (n.nodeType !== 1) continue;
+        for (const k of MARK_FLAGS) if (n.classList.contains(MARK_CLASS[k])) f[k] = true;
+        // color only from spans we rendered — browser typing-style spans and foreign markup contribute plain text
+        const c = n.classList.contains('m-run') && n.style && n.style.color;
+        if (c && !f.c) { const hex = cssColorToHex(c); if (hex) f.c = hex; }
+      }
+      return f;
+    };
+    const walk = node => {
+      for (const ch of node.childNodes) {
+        if (ch.nodeType === 3) {
+          const s = text.length;
+          text += ch.nodeValue.replace(/\n/g, ' ');
+          const f = flagsOf(ch);
+          if (hasFlags(f) && text.length > s) marks.push({ s, e: text.length, ...f });
+        } else if (ch.nodeType === 1) {
+          if (BLOCK.test(ch.tagName) && text && !text.endsWith(' ')) text += ' ';
+          walk(ch);
+        }
+      }
+    };
+    walk(container);
+    return { text, marks: normalizeMarks(marks, text.length) };
+  }
+
+  /** '#rrggbb' or 'rgb(r, g, b)' (what the DOM hands back) → lowercase hex; anything else → ''. */
+  function cssColorToHex(c) {
+    if (HEX_COLOR.test(c)) return c.toLowerCase();
+    const m = /^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/.exec(c);
+    if (!m) return '';
+    return '#' + [m[1], m[2], m[3]].map(v => Math.min(255, +v).toString(16).padStart(2, '0')).join('');
+  }
+
+  const Marks = { normalize: normalizeMarks, apply: applyMarks, toggle: toggleMarks, flagsAt: marksAt, remapWhitespace, renderRuns, serializeDom };
+  window.Marks = Marks;
+
+  /* ---------- links: http(s) URLs derived from node.text on every render, never stored ---------- */
+  const URL_RUN = /https?:\/\/\S+/g;
+  const TRAIL_PUNCT = /[.,;:!?)\]}'"]$/;
+  const CLOSER_OPENER = { ')': '(', ']': '[', '}': '{' };
+
+  /** Sorted, disjoint [{ s, e, href }] where href === text.slice(s, e); [] when the text carries no link. */
+  function findLinks(text) {
+    if (typeof text !== 'string' || !text) return [];
+    const out = [];
+    for (const m of text.matchAll(URL_RUN)) {
+      let run = m[0];
+      // trim trailing closing punctuation, keeping a bracket that closes an opener inside the URL
+      while (TRAIL_PUNCT.test(run)) {
+        const last = run[run.length - 1];
+        const opener = CLOSER_OPENER[last];
+        if (opener) {
+          const body = run.slice(0, -1);
+          const opens = body.split(opener).length - 1, closes = body.split(last).length - 1;
+          if (opens > closes) break;
+        }
+        run = run.slice(0, -1);
+      }
+      if (!/^https?:\/\/./.test(run)) continue;      // bare scheme is ordinary text
+      out.push({ s: m.index, e: m.index + run.length, href: run });
+    }
+    return out;
+  }
+
+  const Links = { find: findLinks };
+  window.Links = Links;
+
   /* ---------- per-node style ---------- */
-  const FILLS = ['#e11d48', '#ea580c', '#d97706', '#16a34a', '#0d9488', '#2563eb', '#7c3aed', '#db2777', '#64748b', '#1e293b'];
-  const TEXT_COLORS = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6', '#3b82f6', '#a855f7', '#ec4899', '#94a3b8', '#ffffff', '#0f172a'];
+  // One palette for both style-bar pickers (fill and text) so they cannot drift apart.
+  const PALETTE = Object.freeze(['#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6', '#3b82f6', '#a855f7', '#ec4899', '#94a3b8', '#ffffff', '#0f172a']);
   const STYLE_CLIP_KEY = 'mindmap.styleClipboard';
 
+  // Relative luminance 0–255 of '#rrggbb' or 'rgb(r, g, b)'; NaN when unparseable.
+  function luminance(color) {
+    let r, g, b;
+    const hex = /^#?([0-9a-f]{6})$/i.exec(color);
+    const rgb = /^rgba?\((\d+)[,\s]+(\d+)[,\s]+(\d+)/i.exec(color);
+    if (hex) { const v = parseInt(hex[1], 16); r = (v >> 16) & 255; g = (v >> 8) & 255; b = v & 255; }
+    else if (rgb) { r = +rgb[1]; g = +rgb[2]; b = +rgb[3]; }
+    else return NaN;
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
   function contrastText(hex) {
-    const m = /^#?([0-9a-f]{6})$/i.exec(hex);
-    if (!m) return '';
-    const v = parseInt(m[1], 16);
-    const r = (v >> 16) & 255, g = (v >> 8) & 255, b = v & 255;
-    const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    const lum = luminance(hex);
+    if (Number.isNaN(lum)) return '';
     return lum > 150 ? '#0f172a' : '#ffffff';
   }
   function getStyle(id) {
@@ -752,7 +1219,7 @@
   function setStyle(id, patch) {
     const f = findNode(state.map.root, id);
     if (!f) return;
-    pushUndo();
+    if (state.editingId !== id) pushUndo();          // while editing, the edit's snapshot covers the change (one undo step per session)
     const next = { ...(f.node.style || {}), ...patch };
     for (const k of Object.keys(next)) if (next[k] === undefined || next[k] === false || next[k] === null || next[k] === '') delete next[k];
     if (Object.keys(next).length) f.node.style = next; else delete f.node.style;
@@ -771,7 +1238,7 @@
     const clip = styleClipboard();
     if (!clip || !findNode(state.map.root, id)) return;
     const f = findNode(state.map.root, id);
-    pushUndo();
+    if (state.editingId !== id) pushUndo();
     if (Object.keys(clip).length) f.node.style = { ...clip }; else delete f.node.style;
     persist(); relayout(); updateStyleBar();
     flashStyleBtn('paste');
@@ -780,6 +1247,105 @@
     const b = $(`[data-sb="${name}"]`, el.stylebar);
     b.classList.add('flash');
     setTimeout(() => b.classList.remove('flash'), 350);
+  }
+
+  /* ---------- node clipboard: one sanitized subtree, shared across maps via localStorage ---------- */
+  const NODE_CLIP_KEY = 'mindmap.nodeClipboard';
+  let nodeClipMem = null;   // session fallback when the localStorage write fails
+
+  /** Whitelist copy: portable fields only — ids are minted at paste, side/color/collapsed derive from the paste position. */
+  function sanitizeSubtree(node) {
+    const out = { text: typeof node.text === 'string' ? node.text : '', children: (node.children || []).map(sanitizeSubtree) };
+    if (node.style && typeof node.style === 'object') out.style = { ...node.style };
+    const marks = Marks.normalize(node.marks, out.text.length);
+    if (marks.length) out.marks = marks;
+    if (typeof node.notes === 'string' && node.notes) out.notes = node.notes;
+    if (Number.isFinite(node.width)) out.width = node.width;
+    return out;
+  }
+  function isValidMarks(marks) {
+    return Array.isArray(marks) && marks.every(r => r && typeof r === 'object'
+      && Number.isInteger(r.s) && Number.isInteger(r.e) && r.s >= 0 && r.s < r.e
+      && ['b', 'i', 'u', 'k'].every(k => r[k] === undefined || r[k] === true)
+      && (r.c === undefined || (typeof r.c === 'string' && /^#[0-9a-f]{6}$/i.test(r.c))));
+  }
+  function isValidClipNode(n) {
+    if (!n || typeof n !== 'object' || typeof n.text !== 'string' || !Array.isArray(n.children)) return false;
+    if (n.style !== undefined && (!n.style || typeof n.style !== 'object')) return false;
+    if (n.marks !== undefined && !isValidMarks(n.marks)) return false;
+    if (n.notes !== undefined && typeof n.notes !== 'string') return false;
+    if (n.width !== undefined && !Number.isFinite(n.width)) return false;
+    return n.children.every(isValidClipNode);
+  }
+  function isValidClipPayload(p) {
+    return !!p && p.v === 1 && Number.isFinite(p.at) && isValidClipNode(p.node)
+      && (p.outline === undefined || typeof p.outline === 'string');
+  }
+  function writeNodeClip(node, outline, at = Date.now()) {
+    const payload = { v: 1, at, node: sanitizeSubtree(node) };
+    if (typeof outline === 'string') payload.outline = outline;   // absent = system clipboard write failed (or pre-upgrade payload)
+    nodeClipMem = payload;
+    try { localStorage.setItem(NODE_CLIP_KEY, JSON.stringify(payload)); } catch (e) { /* quota / disabled storage: memory copy serves this session */ }
+  }
+  function readNodeClip() {
+    let stored = null;
+    try { stored = JSON.parse(localStorage.getItem(NODE_CLIP_KEY)); } catch (e) { stored = null; }
+    if (!isValidClipPayload(stored)) stored = null;
+    const mem = isValidClipPayload(nodeClipMem) ? nodeClipMem : null;
+    if (stored && mem) return stored.at >= mem.at ? stored : mem;   // newest wins across tabs and failed writes
+    return stored || mem;
+  }
+
+  /* ---------- plain-text outline: system clipboard interchange ---------- */
+  const OUTLINE_INDENT = '    ';   // 4 spaces per level, never tabs
+  const PASTE_NODE_LIMIT = 1000;
+
+  /** Visible subtree as text — collapsed nodes keep their line and drop their descendants. */
+  function outlineText(node) {
+    const out = [];
+    (function walk(n, depth) {
+      out.push(OUTLINE_INDENT.repeat(depth) + n.text);
+      if (!n.collapsed) for (const c of n.children || []) walk(c, depth + 1);
+    })(node, 0);
+    return out.join('\n');
+  }
+  function normalizeEol(s) { return s.replace(/\r\n?/g, '\n'); }
+  /** Indented text → ClipNode[] (text + children only). Unit = smallest leading-space run; tab = one level. */
+  function parseOutline(text) {
+    const lines = normalizeEol(text).split('\n')
+      .map(raw => { const m = /^([ \t]*)(.*)$/.exec(raw); return { ws: m[1], body: m[2].trim() }; })
+      .filter(l => l.body);
+    const spaceRuns = lines.map(l => l.ws.replace(/\t/g, '').length).filter(n => n > 0);
+    const unit = spaceRuns.length ? Math.min(...spaceRuns) : Infinity;
+    const roots = [], stack = [];   // stack: [{ level, node }] — the open ancestor chain
+    for (const l of lines) {
+      const tabs = (l.ws.match(/\t/g) || []).length;
+      const spaces = l.ws.length - tabs;
+      let level = tabs + (unit === Infinity ? 0 : Math.floor(spaces / unit));
+      const prev = stack.length ? stack[stack.length - 1].level : -1;
+      if (level > prev + 1) level = prev + 1;   // over-deep jump: at most one level below the previous line
+      while (stack.length && stack[stack.length - 1].level >= level) stack.pop();
+      const node = { text: l.body.replace(/\s+/g, ' '), children: [] };
+      (stack.length ? stack[stack.length - 1].node.children : roots).push(node);
+      stack.push({ level, node });
+    }
+    return roots;
+  }
+
+  /* ---------- toast: transient, non-interactive status line ---------- */
+  let toastEl = null, toastTimer = 0;
+  function showToast(msg) {
+    if (!toastEl) {
+      toastEl = document.createElement('div');
+      toastEl.className = 'toast';
+      toastEl.setAttribute('role', 'status');
+      toastEl.setAttribute('aria-live', 'polite');
+      document.body.appendChild(toastEl);
+    }
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2500);
   }
 
   /* ---------- style bar: show only after the pointer dwells on the selected node ---------- */
@@ -836,10 +1402,14 @@
   function updateStyleBar() {
     const id = state.selectedId;
     const ln = state.layout && id ? state.layout.byId.get(id) : null;
-    const show = !!ln && stylebarArmed && !state.editingId && !(nodeDrag && nodeDrag.active) && !el.editor.hidden;
+    const editing = !!ln && state.editingId === id;
+    const show = !!ln && (editing || (stylebarArmed && !state.editingId)) && !(nodeDrag && nodeDrag.active) && !el.editor.hidden;
     el.stylebar.hidden = !show;
+    $('[data-sb="italic"]', el.stylebar).hidden = !editing;
+    $('[data-sb="underline"]', el.stylebar).hidden = !editing;
     if (!show) { closeStylePop(); return; }
     const st = ln.node.style || {};
+    const ef = editingFlags();                       // selection-aware flags while editing, null otherwise
     const r = viewportRect();
     const v = state.view;
     const p = pos.get(id);
@@ -851,15 +1421,34 @@
     if (y < 8) y = r.height / 2 + v.y + (p.y + ln.h / 2) * v.z + 12;
     el.stylebar.style.transform = `translate(${Math.round(left)}px, ${Math.round(y)}px)`;
     el.stylebar.classList.toggle('below', y > top);
+    const color = ef && (ef.partial || ef.c) ? ef.c : (st.color || '');
     $('#sb-bg-swatch').style.background = st.bg || 'transparent';
     $('#sb-bg-swatch').classList.toggle('none', !st.bg);
-    $('#sb-color-swatch').style.color = st.color || '';
-    $('#sb-color-swatch').style.textDecorationColor = st.color || 'var(--muted)';
-    $('[data-sb="bold"]', el.stylebar).classList.toggle('active', !!st.bold);
-    $('[data-sb="strike"]', el.stylebar).classList.toggle('active', !!st.strike);
+    $('#sb-color-swatch').style.color = color;
+    $('#sb-color-swatch').style.textDecorationColor = color || 'var(--muted)';
+    // Computed bar background, not the theme: tactical maps both themes to one palette.
+    const barLum = luminance(getComputedStyle(el.stylebar).backgroundColor);
+    const lowContrast = !!color && Math.abs(luminance(color) - barLum) < 48;
+    $('#sb-color-swatch').classList.toggle('low-contrast', lowContrast);
+    $('[data-sb="bold"]', el.stylebar).classList.toggle('active', !!st.bold || !!(ef && ef.b));
+    $('[data-sb="strike"]', el.stylebar).classList.toggle('active', !!st.strike || !!(ef && ef.k));
+    $('[data-sb="italic"]', el.stylebar).classList.toggle('active', !!(ef && ef.i));
+    $('[data-sb="underline"]', el.stylebar).classList.toggle('active', !!(ef && ef.u));
     $('[data-sb="paste"]', el.stylebar).disabled = !styleClipboard();
     $('[data-sb="clear"]', el.stylebar).disabled = !Object.keys(st).length;
   }
+  /** Marks carried by the whole current selection of the node being edited; partial = a real range short of the whole text. */
+  function editingFlags() {
+    const id = state.editingId;
+    const n = id && nodeEls.get(id);
+    const found = id && findNode(state.map.root, id);
+    if (!n || !found) return null;
+    const txt = $('.node-text', n);
+    const { s, e, whole } = selectionOffsets(txt);
+    const partial = s < e && !whole;
+    return { ...Marks.flagsAt(found.node.marks, s, e, found.node.text.length), partial };
+  }
+  function onEditSelectionChange() { if (state.editingId) updateStyleBar(); }
   function closeStylePop() {
     el.sbPop.hidden = true;
     $$('.sb-btn.open', el.stylebar).forEach(b => b.classList.remove('open'));
@@ -868,8 +1457,9 @@
   function openStylePop(kind) {
     const id = state.selectedId;
     const st = getStyle(id);
-    const swatches = kind === 'bg' ? FILLS : TEXT_COLORS;
-    const current = kind === 'bg' ? st.bg : st.color;
+    const ef = kind === 'color' ? editingFlags() : null;
+    const swatches = PALETTE;
+    const current = kind === 'bg' ? st.bg : (ef && (ef.partial || ef.c) ? ef.c : st.color);
     el.sbPop.innerHTML = `<div class="sb-pop-title">${kind === 'bg' ? 'Fill' : 'Text'}</div><div class="sb-swatches">`
       + `<button class="sb-sw none${current ? '' : ' current'}" data-value="" title="Default"></button>`
       + swatches.map(c => `<button class="sb-sw${current === c ? ' current' : ''}" data-value="${c}" style="background:${c}" title="${c}"></button>`).join('')
@@ -881,8 +1471,10 @@
   }
   el.stylebar.addEventListener('click', e => {
     const sw = e.target.closest('.sb-sw');
+    const editing = state.editingId && state.editingId === state.selectedId;
     if (sw) {
-      setStyle(state.selectedId, { [el.sbPop.dataset.kind]: sw.dataset.value });
+      if (editing && el.sbPop.dataset.kind === 'color') applyMarkAction(state.selectedId, 'color', sw.dataset.value);
+      else setStyle(state.selectedId, { [el.sbPop.dataset.kind]: sw.dataset.value });
       closeStylePop();
       return;
     }
@@ -893,8 +1485,10 @@
       case 'bg': case 'color':
         if (b.classList.contains('open')) closeStylePop(); else openStylePop(b.dataset.sb);
         break;
-      case 'bold': toggleStyle(id, 'bold'); break;
-      case 'strike': toggleStyle(id, 'strike'); break;
+      case 'bold': if (editing) applyMarkAction(id, 'bold'); else toggleStyle(id, 'bold'); break;
+      case 'strike': if (editing) applyMarkAction(id, 'strike'); else toggleStyle(id, 'strike'); break;
+      case 'italic': if (editing) applyMarkAction(id, 'italic'); break;
+      case 'underline': if (editing) applyMarkAction(id, 'underline'); break;
       case 'copy': copyStyle(id); break;
       case 'paste': pasteStyle(id); break;
       case 'clear': clearStyle(id); break;
@@ -989,9 +1583,15 @@
   /* ---------- navigation ---------- */
   function nearestVertical(id, dir) {
     const L = state.layout, cur = L.byId.get(id);
+    if (cur.parent) {
+      // siblings share a column; root children only count on their own side
+      const column = cur.parent.children.filter(c => c.side === cur.side);
+      const adjacent = column[column.indexOf(cur) + dir];
+      if (adjacent) return adjacent;
+    }
     let best = null, bestScore = Infinity;
     for (const ln of L.nodes) {
-      if (ln === cur) continue;
+      if (ln === cur || (cur.side && ln.side !== cur.side)) continue;
       const dy = ln.y - cur.y;
       if (dir < 0 ? dy > -1 : dy < 1) continue;
       const score = Math.abs(dy) + Math.abs(ln.x - cur.x) * 2.2 + (ln.depth !== cur.depth ? 60 : 0);
@@ -1077,6 +1677,20 @@
   // pointer: pan on background, select on node, drag a node to reparent it
   let drag = null;       // background pan
   let nodeDrag = null;   // { id, x, y, active, ghost, targetId, subtree:Set }
+  let resizeDrag = null;    // { id, edge, startX, startW, live, moved, el }
+  let pendingLink = null;   // { href, x, y } armed by a modifier+pointerdown on a link, consumed by the matching pointerup
+  let lastLinkOpen = { href: '', t: -Infinity };
+  const DBLCLICK_MS = 500;  // a modifier double-click arms twice; the second release must not open a second tab
+  const isModClick = e => e.button === 0 && (IS_MAC ? e.metaKey : e.ctrlKey);
+  // body.mod-held drives the pointer cursor over links while the platform modifier is down
+  const setModHeld = on => document.body.classList.toggle('mod-held', on);
+  const onModKey = e => setModHeld(IS_MAC ? e.metaKey : e.ctrlKey);
+  document.addEventListener('keydown', onModKey);
+  document.addEventListener('keyup', onModKey);
+  window.addEventListener('blur', () => setModHeld(false));
+  document.addEventListener('visibilitychange', () => { if (document.hidden) setModHeld(false); });
+  let lastHandleTap = null; // { id, edge, t } — double-tap/click reset detection
+  const RESIZE_TAP_MS = 300;
   const DRAG_THRESHOLD = 6;
 
   function subtreeIds(id) {
@@ -1204,8 +1818,60 @@
     persist(); relayout(); select(id);
   }
 
+  /* drag a resize handle to set a custom node width; double-tap/click on it resets to auto */
+  function beginResize(e, id, edge) {
+    e.preventDefault();
+    if (state.editingId) commitEdit();
+    select(id, { reveal: false });
+    if (animating) { applyFrame(1); animating = false; }  // settle in-flight tweens so the preview owns the transform
+    const ln = state.layout.byId.get(id);
+    resizeDrag = { id, edge, pointerId: e.pointerId, startX: e.clientX, startW: ln.w, live: ln.w, moved: false, el: nodeEls.get(id) };
+    el.viewport.setPointerCapture(e.pointerId);
+  }
+  function moveResize(e) {
+    if (!resizeDrag.moved && Math.abs(e.clientX - resizeDrag.startX) < 3) return;
+    resizeDrag.moved = true;
+    const dir = resizeDrag.edge === 'L' ? -1 : 1;
+    const w = Layout.clampWidth(resizeDrag.startW + dir * (e.clientX - resizeDrag.startX) / state.view.z);
+    if (w === resizeDrag.live) return;
+    const ln = state.layout.byId.get(resizeDrag.id), p = pos.get(resizeDrag.id), n = resizeDrag.el;
+    if (!ln || !p) return;                                   // node vanished mid-gesture
+    resizeDrag.live = w;
+    n.style.maxWidth = 'none';
+    n.style.width = w + 'px';
+    // preview only the grabbed node, opposite edge anchored; the tree reflows on release
+    const x = resizeDrag.edge === 'L' ? p.x + resizeDrag.startW / 2 - w : p.x - resizeDrag.startW / 2;
+    n.style.transform = `translate3d(${x}px, ${p.y - ln.h / 2}px, 0)`;
+  }
+  function endResize(commit) {
+    const rd = resizeDrag;
+    resizeDrag = null;
+    const ln = state.layout.byId.get(rd.id);
+    if (!ln) { relayout(); return; }              // node deleted mid-gesture
+    const node = ln.node;
+    if (rd.moved) {
+      lastHandleTap = null;
+      if (commit && rd.live !== rd.startW) {
+        pushUndo(); node.width = Math.round(rd.live); persist(); relayout(); select(rd.id);
+      } else {
+        relayout();  // data unchanged — rerender to drop the preview styles
+      }
+      return;
+    }
+    if (!commit) { lastHandleTap = null; return; }  // cancelled press never taps or resets
+    const now = performance.now();
+    if (lastHandleTap && lastHandleTap.id === rd.id && lastHandleTap.edge === rd.edge && now - lastHandleTap.t < RESIZE_TAP_MS) {
+      lastHandleTap = null;
+      if (node.width !== undefined) { pushUndo(); delete node.width; persist(); relayout(); select(rd.id); }
+    } else {
+      lastHandleTap = { id: rd.id, edge: rd.edge, t: now };
+    }
+  }
+
   el.viewport.addEventListener('pointerdown', e => {
     if (e.button !== 0) return;
+    pendingLink = null;
+    if (resizeDrag || nodeDrag || drag) return;              // one gesture at a time owns the interaction
     if (e.target.closest('.stylebar')) return;
     closeStylePop();
     if (document.activeElement === el.title) el.title.blur();
@@ -1214,7 +1880,19 @@
       const id = nodeEl.dataset.id;
       if (e.target.closest('.badge')) { e.preventDefault(); toggleCollapse(id); return; }
       if (e.target.closest('.note-mark')) { e.preventDefault(); if (state.editingId) commitEdit(); select(id, { reveal: false }); setNotesPaneOpen(true); return; }
+      const rh = e.target.closest('.resize-handle');
+      if (rh) { beginResize(e, id, rh.dataset.edge); return; }
       if (state.editingId === id) return;
+      const link = e.target.closest('.m-a');
+      if (link && isModClick(e)) {
+        // follow the link on release; no select, no drag — another node's edit still commits like on any click outside it.
+        // Capture first: that commit relayouts and re-renders this span, and a detached down-target would otherwise lose the release.
+        e.preventDefault();
+        try { el.viewport.setPointerCapture(e.pointerId); } catch { /* synthetic pointer: release still bubbles to the viewport */ }
+        pendingLink = { href: link.dataset.href, x: e.clientX, y: e.clientY };
+        if (state.editingId) commitEdit();
+        return;
+      }
       e.preventDefault();
       if (state.editingId) commitEdit();
       select(id, { reveal: false });
@@ -1228,6 +1906,7 @@
     el.viewport.setPointerCapture(e.pointerId);
   });
   el.viewport.addEventListener('pointermove', e => {
+    if (resizeDrag) { if (e.pointerId === resizeDrag.pointerId) moveResize(e); return; }
     if (nodeDrag) {
       if (!nodeDrag.active) {
         if (Math.hypot(e.clientX - nodeDrag.x, e.clientY - nodeDrag.y) < DRAG_THRESHOLD) return;
@@ -1243,6 +1922,8 @@
     if (drag.moved) { state.view.x = drag.vx + dx; state.view.y = drag.vy + dy; applyView(); }
   });
   el.viewport.addEventListener('pointerup', e => {
+    if (pendingLink) { openPendingLink(e); return; }
+    if (resizeDrag) { if (e.pointerId === resizeDrag.pointerId) endResize(true); return; }
     if (nodeDrag) { if (nodeDrag.active) endNodeDrag(true); else nodeDrag = null; return; }
     if (!drag) return;
     if (!drag.moved) {
@@ -1253,17 +1934,37 @@
     drag = null;
     el.viewport.classList.remove('panning');
   });
-  el.viewport.addEventListener('pointercancel', () => {
+  el.viewport.addEventListener('pointercancel', e => {
+    pendingLink = null;
+    if (resizeDrag) { if (e.pointerId === resizeDrag.pointerId) endResize(false); return; }
     if (nodeDrag) endNodeDrag(false);
     drag = null;
     el.viewport.classList.remove('panning');
   });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape' && nodeDrag && nodeDrag.active) endNodeDrag(false); }, true);
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    // consume the Escape that cancels a gesture so downstream handlers don't also act on it
+    if (resizeDrag) { e.preventDefault(); e.stopPropagation(); endResize(false); return; }
+    if (nodeDrag && nodeDrag.active) { e.preventDefault(); e.stopPropagation(); endNodeDrag(false); }
+  }, true);
 
   el.viewport.addEventListener('dblclick', e => {
-    const nodeEl = e.target.closest('.node');
-    if (nodeEl && !e.target.closest('.badge')) startEdit(nodeEl.dataset.id);
+    // pointer capture armed for node drag retargets dblclick to the viewport; hit-test the real element
+    const hit = document.elementFromPoint(e.clientX, e.clientY) || e.target;
+    const nodeEl = hit.closest('.node');
+    if (!nodeEl || nodeEl.dataset.id === state.editingId) return;  // already editing: keep the native word selection
+    if (isModClick(e) && hit.closest('.m-a')) return;                // the first click already opened the link; don't also edit
+    if (!hit.closest('.badge') && !hit.closest('.resize-handle') && !hit.closest('.note-mark')) startEdit(nodeEl.dataset.id);
   });
+  /** Release of a modifier+pointerdown on a link: open it unless the pointer dragged off or this is a double-click's second release. */
+  function openPendingLink(e) {
+    const { href, x, y } = pendingLink;
+    pendingLink = null;
+    if (Math.hypot(e.clientX - x, e.clientY - y) > DRAG_THRESHOLD || !isModClick(e) || !/^https?:\/\//.test(href)) return;
+    if (href === lastLinkOpen.href && e.timeStamp - lastLinkOpen.t < DBLCLICK_MS) return;
+    lastLinkOpen = { href, t: e.timeStamp };
+    window.open(href, '_blank', 'noopener,noreferrer');
+  }
 
   $('#zoom-in').addEventListener('click', () => zoomAt(1.25, undefined, undefined, true));
   $('#zoom-out').addEventListener('click', () => zoomAt(0.8, undefined, undefined, true));
@@ -1275,13 +1976,18 @@
   el.title.addEventListener('input', () => {
     state.map.title = el.title.value.trim() || 'Untitled map';
     state.map.titleCustom = true;
+    updateDocumentTitle(el.title.value);
     persist();
   });
   el.title.addEventListener('keydown', e => {
     e.stopPropagation();
     if (e.key === 'Enter' || e.key === 'Escape') el.title.blur();
   });
-  el.title.addEventListener('blur', () => { if (!el.title.value.trim()) el.title.value = state.map.title; });
+  el.title.addEventListener('blur', () => {
+    if (!state.map) return; // focus-fixup blur after showHome() tore the editor down
+    if (!el.title.value.trim()) el.title.value = state.map.title;
+    updateDocumentTitle(el.title.value);
+  });
 
   /* ---------- help ---------- */
   const SHORTCUTS = [
@@ -1298,6 +2004,8 @@
       [['⌫'], 'Delete the node and its branch'],
       [[MOD, 'I'], 'Open the notes pane for the node'],
       [['Esc'], 'Leave the notes pane (while writing notes)'],
+      [[MOD, 'C'], 'Copy the branch (also as text)'],
+      [[MOD, 'V'], 'Paste the branch or clipboard text as children'],
     ]],
     ['Navigate', [
       [['↑', '↓'], 'Move between siblings'],
@@ -1314,8 +2022,10 @@
       [[MOD, 'Shift', 'Z'], 'Redo'],
     ]],
     ['Style', [
-      [[MOD, 'B'], 'Bold'],
-      [[MOD, 'Shift', 'X'], 'Strikethrough'],
+      [[MOD, 'B'], 'Bold (selected text while editing, or the node)'],
+      [[MOD, 'Shift', 'X'], 'Strikethrough (selected text while editing, or the node)'],
+      [[MOD, 'I'], 'Italic (selected text, while editing)'],
+      [[MOD, 'U'], 'Underline (selected text, while editing)'],
       [[MOD, 'Shift', 'C'], 'Copy the node’s style'],
       [[MOD, 'Shift', 'V'], 'Paste the copied style'],
     ]],
@@ -1339,11 +2049,16 @@
   $('#back').addEventListener('click', () => { location.hash = '#/'; });
 
   /* ---------- global keyboard ---------- */
-  document.addEventListener('keydown', e => {
-    if (!state.map || el.editor.hidden) return;
+  /** True while map-level shortcuts must stay out of the way: no editor, mid-gesture, text field focused, or a node being edited. */
+  function shortcutsBlocked(e) {
+    if (!state.map || el.editor.hidden) return true;
+    if (resizeDrag || (nodeDrag && nodeDrag.active)) return true;   // no tree mutations mid-gesture (Escape is handled upstream)
     const t = e.target;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-    if (state.editingId) return;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return true;
+    return !!state.editingId;
+  }
+  document.addEventListener('keydown', e => {
+    if (shortcutsBlocked(e)) return;
 
     const mod = e.metaKey || e.ctrlKey;
     const id = state.selectedId;
@@ -1376,6 +2091,8 @@
     if (mod && e.shiftKey && key.toLowerCase() === 'x') { e.preventDefault(); toggleStyle(id, 'strike'); return; }
     if (mod && e.shiftKey && key.toLowerCase() === 'c') { e.preventDefault(); copyStyle(id); return; }
     if (mod && e.shiftKey && key.toLowerCase() === 'v') { e.preventDefault(); pasteStyle(id); return; }
+    if (mod && !e.shiftKey && key.toLowerCase() === 'c') { e.preventDefault(); copyNode(id); return; }
+    // plain Cmd/Ctrl+V is deliberately NOT intercepted: the browser's `paste` event (below) carries the system clipboard text
     if (mod && e.shiftKey && key === 'ArrowLeft') { e.preventDefault(); setSide(id, 'L'); return; }
     if (mod && e.shiftKey && key === 'ArrowRight') { e.preventDefault(); setSide(id, 'R'); return; }
     if (e.altKey && key === 'ArrowUp') { e.preventDefault(); moveSibling(id, -1); return; }
@@ -1397,6 +2114,23 @@
       e.preventDefault();
       startEdit(id, key);
     }
+  });
+
+  // Cmd/Ctrl+V with a node selected: the node clipboard wins only while the system text is still our own outline.
+  document.addEventListener('paste', e => {
+    if (shortcutsBlocked(e)) return;                                  // text fields keep native paste
+    const id = state.selectedId;
+    if (!id || !findNode(state.map.root, id)) return;
+    e.preventDefault();
+    let text = null;
+    try { text = e.clipboardData ? e.clipboardData.getData('text/plain') : null; } catch (err) { text = null; }
+    const readable = typeof text === 'string';
+    const clip = readNodeClip();
+    const internalWins = clip && (typeof clip.outline !== 'string' || !readable || !text.trim()
+      || normalizeEol(text) === normalizeEol(clip.outline));
+    if (internalWins) { pasteNode(id); return; }
+    if (readable && text.trim()) { pasteText(id, parseOutline(text)); return; }
+    if (!readable) showToast("Couldn't read the system clipboard");
   });
 
   /* ================================================================ SEED + ROUTER */
@@ -1434,14 +2168,21 @@
     if (m) openEditor(m[1]); else showHome();
   }
   window.addEventListener('hashchange', route);
+  window.addEventListener('beforeunload', e => {
+    if (state.saveFailed && state.map) { e.preventDefault(); e.returnValue = ''; }
+  });
 
   document.fonts.ready.then(() => {
     Layout.clearCache();
     if (state.map) relayout(true); else if (!el.home.hidden) renderLibrary();
   });
 
-  seedIfEmpty().then(route);
+  seedIfEmpty().then(() => {
+    Store.migrate();
+    Usage.refresh();
+    route();
+  });
 
-  // Small read/select hook for alternative front-ends (see tactical.html). Additive only.
-  window.Mindmap = { state, select, findNode: id => (state.map ? findNode(state.map.root, id) : null) };
+  // Small read/select hook for alternative front-ends (see tactical.html) and console verification. Additive only.
+  window.Mindmap = { state, select, findNode: id => (state.map ? findNode(state.map.root, id) : null), startEdit, commitEdit, readNodeClip, writeNodeClip, copyNode, pasteNode, pasteText, outlineText, parseOutline, showToast, Usage, PALETTE };
 })();

@@ -25,6 +25,7 @@
   --accent: #4af626;
   --accent-2: #a4ff85;
   --accent-soft: rgba(74, 246, 38, 0.14);
+  --link: var(--accent-2);
   --danger: #ff3b3b;
   --grid: rgba(74, 246, 38, 0.10);
   --shadow: 0 0 40px rgba(0, 0, 0, 0.6);
@@ -97,6 +98,12 @@ body { background: var(--bg); color: var(--text); }
 }
 .save-status.is-saved .dot { background: var(--phos); box-shadow: 0 0 8px var(--phos-dim); }
 .save-status.is-saving .dot { background: var(--amber); }
+.save-status.is-failed { color: var(--red); border-color: var(--red); text-shadow: 0 0 10px rgba(255, 59, 59, 0.5); }
+.save-status.is-failed .dot { background: var(--red); box-shadow: 0 0 8px rgba(255, 59, 59, 0.6); }
+.storage-usage { font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; }
+.storage-usage.is-warn { color: var(--amber); text-shadow: 0 0 10px rgba(255, 176, 46, 0.5); }
+/* the wide-tracked status pill leaves no room beside it under ~1180px; the HUD cell still shows the figure */
+@media (max-width: 1180px) { .topbar-center .storage-usage { display: none; } }
 
 /* ---------- library ---------- */
 .library { padding: 26px 22px 40px; }
@@ -164,6 +171,7 @@ body { background: var(--bg); color: var(--text); }
 }
 .hud b.hud__red { color: var(--red); text-shadow: 0 0 10px rgba(255, 59, 59, 0.5); }
 .hud b.hud__amber { color: var(--amber); text-shadow: 0 0 10px rgba(255, 176, 46, 0.5); }
+.hud span.hud__amber { color: var(--amber); }
 .hud--tl { top: 14px; left: 18px; }
 .hud--tr { top: 14px; right: 18px; text-align: right; }
 .hud--bl { bottom: 14px; left: 18px; }
@@ -210,6 +218,7 @@ body { background: var(--bg); color: var(--text); }
 .badge { border-radius: 0; box-shadow: 0 0 0 2px #03110a; font-size: 10px; }
 .node.has-children:hover .badge { width: 10px; height: 10px; }
 .node.dragging { opacity: .25; }
+.resize-handle::after { border-radius: 0; background: var(--amber); }
 .node.drop-target { outline: 1px solid var(--amber); outline-offset: 5px; box-shadow: 0 0 20px rgba(255, 176, 46, .45); }
 .node.depth-1.drop-target, .node.depth-n.drop-target { border-color: var(--amber); background: rgba(255, 176, 46, .08); }
 .drag-ghost { border-radius: 0; background: var(--bg-2); border: 1px solid var(--branch, var(--phos)); color: var(--text-bright); letter-spacing: 0.08em; }
@@ -226,6 +235,7 @@ body { background: var(--bg); color: var(--text); }
 .stylebar .sb-btn.active, .stylebar .sb-btn.open { background: var(--phos); color: #04170a; }
 .stylebar .sb-btn.flash { background: var(--amber); color: #04170a; }
 .sb-swatch { border-radius: 0; border-color: var(--line); }
+.stylebar .sb-a { border-radius: 0; box-shadow: 0 0 0 1.5px var(--line); }
 .sb-pop { border-radius: 0; background: var(--bg-2); border-color: var(--phos); }
 .sb-sw { border-radius: 0; }
 .sb-sw.current { box-shadow: 0 0 0 2px var(--bg-2), 0 0 0 3px var(--phos); }

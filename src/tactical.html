@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MINDSCOPE</title>
+  <title>Mindmap</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 fill=%27%23020705%27/%3E%3Cg stroke=%27%234af626%27 stroke-width=%272%27 fill=%27%234af626%27%3E%3Cpath d=%27M16 16L8 9M16 16l8-7M16 16l-8 7M16 16l8 7%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%274%27/%3E%3Ccircle cx=%278%27 cy=%279%27 r=%272.5%27/%3E%3Ccircle cx=%2724%27 cy=%279%27 r=%272.5%27/%3E%3Ccircle cx=%278%27 cy=%2723%27 r=%272.5%27/%3E%3Ccircle cx=%2724%27 cy=%2723%27 r=%272.5%27/%3E%3C/g%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -38,6 +38,7 @@
       <div class="library-head">
         <h1>MISSION FILES</h1>
         <span id="map-count" class="muted"></span>
+        <span class="storage-usage muted" data-storage-usage></span>
       </div>
       <div id="cards" class="cards"></div>
       <div id="empty" class="empty" hidden>
@@ -64,6 +65,7 @@
       </div>
       <div class="topbar-center">
         <span id="save-status" class="save-status is-saved"><span class="dot"></span><span class="label">All changes saved</span></span>
+        <span class="storage-usage muted" data-storage-usage></span>
       </div>
       <div class="topbar-right">
         <div class="btn-group">
@@ -93,7 +95,7 @@
           <i class="corner corner--bl"></i><i class="corner corner--br"></i>
           <div class="hud hud--tl">NODES<b class="js-hud-nodes">0</b><span class="js-hud-depth">DEPTH 0</span></div>
           <div class="hud hud--tr">ZOOM<b class="js-hud-zoom">100%</b><span>SCOPE SCALE</span></div>
-          <div class="hud hud--bl">LINK<b class="js-hud-link">SYNCED</b><span>LOCAL STORE</span></div>
+          <div class="hud hud--bl">LINK<b class="js-hud-link">SYNCED</b><span class="js-hud-store">LOCAL STORE</span></div>
           <div class="hud hud--br">LOCK<b class="js-hud-lock hud__red">NONE</b><span class="js-hud-lock-sub">NO TARGET</span></div>
 
           <div id="stylebar" class="stylebar" hidden>
@@ -101,6 +103,8 @@
             <button class="sb-btn" data-sb="color" title="Text color"><span class="sb-a" id="sb-color-swatch">A</span></button>
             <span class="sb-sep"></span>
             <button class="sb-btn" data-sb="bold" title="Bold (⌘B)"><b>B</b></button>
+            <button class="sb-btn" data-sb="italic" title="Italic (⌘I)" hidden><i>I</i></button>
+            <button class="sb-btn" data-sb="underline" title="Underline (⌘U)" hidden><u>U</u></button>
             <button class="sb-btn" data-sb="strike" title="Strikethrough (⌘⇧X)"><s>S</s></button>
             <span class="sb-sep"></span>
             <button class="sb-btn" data-sb="copy" title="Copy style (⌘⇧C)" data-icon="roller"></button>
@@ -147,6 +151,7 @@
 <!-- offscreen text measurer (must share node styles) -->
 <div id="measure" class="node measure depth-n"><span class="node-text"></span></div>
 
+<script src="js/lz-string.js"></script>
 <script src="js/store.js"></script>
 <script src="js/layout.js"></script>
 <script src="js/tactical.js"></script>

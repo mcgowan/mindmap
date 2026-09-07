@@ -57,8 +57,10 @@
     if (!state.map || !state.layout) return;
 
     const sel = state.selectedId && M.findNode(state.selectedId);
+    const storeLabel = ($('#editor [data-storage-usage]') || {}).textContent || '';
+    const storeWarn = document.body.dataset.storageWarn === '1';
     const sig = [state.selectedId, state.editingId, state.map.updatedAt, state.layout.nodes.length,
-      $('#zoom-level').textContent, $('#save-status').className, sel && JSON.stringify(sel.node.style || {})].join('|');
+      $('#zoom-level').textContent, $('#save-status').className, storeLabel, storeWarn, sel && JSON.stringify(sel.node.style || {})].join('|');
     if (sig === lastSig) return;
     const typingNotes = document.activeElement && document.activeElement.classList.contains('notes-input');
     if (typingNotes) return; // re-render after blur; keeps the caret where it is
@@ -70,13 +72,18 @@
     const branches = root.children.length;
     const zoom = $('#zoom-level').textContent;
     const synced = $('#save-status').classList.contains('is-saved');
+    const failed = $('#save-status').classList.contains('is-failed');
 
     $('.js-hud-nodes').textContent = total;
     $('.js-hud-depth').textContent = `DEPTH ${depth} · ${branches} BRANCH${branches === 1 ? '' : 'ES'}`;
     $('.js-hud-zoom').textContent = zoom;
     const link = $('.js-hud-link');
-    link.textContent = synced ? 'SYNCED' : 'TX';
-    link.classList.toggle('hud__amber', !synced);
+    link.textContent = failed ? 'FAULT' : synced ? 'SYNCED' : 'TX';
+    link.classList.toggle('hud__amber', !synced && !failed);
+    link.classList.toggle('hud__red', failed);
+    const store = $('.js-hud-store');
+    store.textContent = storeLabel ? `LOCAL STORE · ${storeLabel.toUpperCase()}` : 'LOCAL STORE';
+    store.classList.toggle('hud__amber', storeWarn);
     const lock = $('.js-hud-lock');
     lock.textContent = sel ? sel.node.text.toUpperCase() : 'NONE';
     lock.classList.toggle('hud__red', !sel);

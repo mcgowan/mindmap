@@ -39,6 +39,7 @@
       <div class="library-head">
         <h1>Your mind maps</h1>
         <span id="map-count" class="muted"></span>
+        <span class="storage-usage muted" data-storage-usage></span>
       </div>
       <div id="cards" class="cards"></div>
       <div id="empty" class="empty" hidden>
@@ -64,6 +65,7 @@
       </div>
       <div class="topbar-center">
         <span id="save-status" class="save-status is-saved"><span class="dot"></span><span class="label">All changes saved</span></span>
+        <span class="storage-usage muted" data-storage-usage></span>
       </div>
       <div class="topbar-right">
         <div class="btn-group">
@@ -93,6 +95,8 @@
         <button class="sb-btn" data-sb="color" title="Text color"><span class="sb-a" id="sb-color-swatch">A</span></button>
         <span class="sb-sep"></span>
         <button class="sb-btn" data-sb="bold" title="Bold (⌘B)"><b>B</b></button>
+        <button class="sb-btn" data-sb="italic" title="Italic (⌘I)" hidden><i>I</i></button>
+        <button class="sb-btn" data-sb="underline" title="Underline (⌘U)" hidden><u>U</u></button>
         <button class="sb-btn" data-sb="strike" title="Strikethrough (⌘⇧X)"><s>S</s></button>
         <span class="sb-sep"></span>
         <button class="sb-btn" data-sb="copy" title="Copy style (⌘⇧C)" data-icon="roller"></button>
@@ -139,6 +143,7 @@
   <!-- offscreen text measurer (must share node styles) -->
   <div id="measure" class="node measure depth-n"><span class="node-text"></span></div>
 
+  <script src="js/lz-string.js"></script>
   <script src="js/store.js"></script>
   <script src="js/layout.js"></script>
   <script src="js/app.js"></script>
