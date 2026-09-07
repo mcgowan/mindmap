@@ -198,6 +198,7 @@ svg { display: block; }
 .storage-usage:empty { display: none; }
 .storage-usage.is-warn { color: var(--warn); font-weight: 600; }
 .topbar-center { gap: 12px; }
+.topbar-center .storage-usage { position: relative; top: 8px; }
 .topbar-center .storage-usage::before { content: '·'; margin-right: 12px; opacity: .5; }
 
 /* ---------- Library ---------- */
