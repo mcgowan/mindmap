@@ -1962,7 +1962,7 @@
       const primary = state.primaryId;
       const primaryFound = primary && findNode(state.map.root, primary), pressedFound = findNode(state.map.root, id);
       const op = SelectionCore.resolvePress({
-        meta: e.metaKey || e.ctrlKey, shift: e.shiftKey,
+        meta: IS_MAC ? e.metaKey : e.ctrlKey, shift: e.shiftKey,
         isMember: Selection.has(id), isMulti: Selection.size() > 1,
         sameParent: !!(primaryFound && pressedFound && primaryFound.parent && primaryFound.parent === pressedFound.parent),
       });
@@ -2042,8 +2042,8 @@
     box.className = 'marquee';
     box.hidden = true;
     el.viewport.appendChild(box);
-    // Cmd/Ctrl adds to the current selection; otherwise the rectangle replaces it
-    marquee = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY, base: (e.metaKey || e.ctrlKey) ? Selection.ids() : [], moved: false, el: box, hits: [] };
+    // Cmd (Ctrl off macOS) adds to the current selection; otherwise the rectangle replaces it
+    marquee = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY, base: (IS_MAC ? e.metaKey : e.ctrlKey) ? Selection.ids() : [], moved: false, el: box, hits: [] };
     el.viewport.setPointerCapture(e.pointerId);
     updateStyleBar();
   }
