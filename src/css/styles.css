@@ -333,6 +333,11 @@ html.theme-transition, html.theme-transition *, html.theme-transition *::before,
 .node.depth-n:hover { border-color: var(--border-strong); }
 .node.selected { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--ring), var(--node-shadow); }
 .node.depth-0.selected { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--ring), 0 8px 28px rgba(91, 141, 239, .35); }
+/* multi-selection: the primary carries a doubled ring — a shape cue, not a color one */
+.viewport.multi-select .node.selected.primary { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--ring), 0 0 0 6px var(--bg), 0 0 0 7px var(--ring), var(--node-shadow); }
+.viewport.multi-select .node.depth-0.selected.primary { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--ring), 0 0 0 6px var(--bg), 0 0 0 7px var(--ring), 0 8px 28px rgba(91, 141, 239, .35); }
+.viewport.multi-select .resize-handle { display: none; }
+.marquee { position: absolute; pointer-events: none; z-index: 5; border: 1px solid var(--accent-2); background: var(--accent-soft); border-radius: 3px; }
 .node.editing { cursor: text; user-select: text; -webkit-user-select: text; }
 .node.editing, .node.depth-0.editing {
   box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--ring), 0 14px 36px rgba(0, 0, 0, .35);
@@ -450,6 +455,7 @@ body.mod-held .node:not(.editing) .m-a { cursor: pointer; }
 .stylebar .sb-btn b { font-weight: 700; }
 .stylebar .sb-btn s { text-decoration-thickness: 1.5px; }
 .stylebar .sb-sep { width: 1px; height: 18px; background: var(--border); margin: 0 3px; }
+.stylebar .sb-count { min-width: 22px; height: 22px; padding: 0 6px; border-radius: 11px; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; background: var(--accent); color: #fff; margin-right: 2px; }
 .sb-swatch {
   width: 16px; height: 16px; border-radius: 5px; border: 1.5px solid var(--border-strong);
   background: transparent;

@@ -24,6 +24,8 @@ const Layout = (() => {
   let measureText = null;
 
   const depthClass = d => (d === 0 ? 'depth-0' : d === 1 ? 'depth-1' : 'depth-n');
+  const hasMarks = marks => Array.isArray(marks) && marks.length > 0;
+  const marksSig = marks => (hasMarks(marks) ? JSON.stringify(marks) : '');
 
   /** Valid custom width clamped to bounds, or undefined for automatic sizing. */
   function clampWidth(w) {
@@ -31,22 +33,24 @@ const Layout = (() => {
     return Math.min(MAX_NODE_W, Math.max(MIN_NODE_W, w));
   }
 
+  /** Next stored width after a fit gesture: the clamped one-line width, or undefined to return to automatic
+   *  sizing when auto already renders one line (fit <= auto) or the node is already at its fit width.
+   *  `current` is the stored custom width already passed through clampWidth (undefined = automatic). */
+  function resolveFitWidth(current, fit, auto) {
+    if (fit <= auto) return undefined;
+    const target = clampWidth(fit);
+    return target === current ? undefined : target;
+  }
+
   function measure(text, depth, bold = false, width, marks) {
-    const sig = Array.isArray(marks) && marks.length ? JSON.stringify(marks) : '';
+    const sig = marksSig(marks);
     const key = depthClass(depth) + (bold ? ' b ' : ' ') + (width !== undefined ? width : 'auto') + '|' + sig + '|' + text;
     let m = cache.get(key);
     if (m) return m;
-    if (!measureEl) {
-      measureEl = document.getElementById('measure');
-      measureText = measureEl.querySelector('.node-text');
-    }
-    measureEl.className = 'node measure ' + depthClass(depth) + (bold ? ' is-bold' : '');
-    // pin the width so only the wrapped height is discovered; reset so auto calls stay auto
-    measureEl.style.width = width !== undefined ? width + 'px' : '';
-    measureEl.style.maxWidth = width !== undefined ? 'none' : '';
-    // Marks / Links are defined by app.js (loaded after this file) — look them up at call time
-    const linked = !!(window.Links && window.Links.find(text).length);
-    if ((sig || linked) && window.Marks) window.Marks.renderRuns(measureText, text, marks); else measureText.textContent = text || ' ';
+    prepareMeasureEl(depth, bold);
+    // pin the width so only the wrapped height is discovered; auto calls keep the CSS max-width cap
+    if (width !== undefined) { measureEl.style.width = width + 'px'; measureEl.style.maxWidth = 'none'; }
+    renderMeasureText(text, marks);
     const r = measureEl.getBoundingClientRect();
     // +1 guards against sub-pixel rounding that would otherwise wrap the last letter
     m = width !== undefined
@@ -54,6 +58,43 @@ const Layout = (() => {
       : { w: Math.ceil(r.width) + 1, h: Math.ceil(r.height) };
     cache.set(key, m);
     return m;
+  }
+
+  /** Width (px, unclamped) at which the text renders on a single line — the fit target of a handle double-click. */
+  function fitWidth(text, depth, bold = false, marks) {
+    const sig = marksSig(marks);
+    const key = 'fit|' + depthClass(depth) + (bold ? ' b ' : ' ') + sig + '|' + text;
+    let w = cache.get(key);
+    if (w !== undefined) return w;
+    prepareMeasureEl(depth, bold);
+    measureEl.style.maxWidth = 'none';
+    // `pre` is the non-wrapping counterpart of the live node's `pre-wrap`: same whitespace, one line
+    measureEl.style.whiteSpace = 'pre';
+    renderMeasureText(text, marks);
+    w = Math.ceil(measureEl.getBoundingClientRect().width) + 1;
+    // belt and braces: prepareMeasureEl resets too, but a leaked `pre` would un-wrap every auto measure
+    measureEl.style.whiteSpace = '';
+    measureEl.style.maxWidth = '';
+    cache.set(key, w);
+    return w;
+  }
+
+  /** Shared #measure element in a known state: node classes set, no inline sizing left over from the last call. */
+  function prepareMeasureEl(depth, bold) {
+    if (!measureEl) {
+      measureEl = document.getElementById('measure');
+      measureText = measureEl.querySelector('.node-text');
+    }
+    measureEl.className = 'node measure ' + depthClass(depth) + (bold ? ' is-bold' : '');
+    measureEl.style.width = '';
+    measureEl.style.maxWidth = '';
+    measureEl.style.whiteSpace = '';
+  }
+
+  function renderMeasureText(text, marks) {
+    // Marks / Links are defined by app.js (loaded after this file) — look them up at call time
+    const linked = !!(window.Links && window.Links.find(text).length);
+    if ((hasMarks(marks) || linked) && window.Marks) window.Marks.renderRuns(measureText, text, marks); else measureText.textContent = text || ' ';
   }
 
   function countDescendants(node) {
@@ -163,5 +204,5 @@ const Layout = (() => {
     ].join('');
   }
 
-  return { compute, linkPoints, linkPath, clampWidth, clearCache: () => cache.clear(), PALETTE, H_GAP, V_GAP, MIN_NODE_W, MAX_NODE_W };
+  return { compute, linkPoints, linkPath, measure, fitWidth, clampWidth, resolveFitWidth, clearCache: () => cache.clear(), PALETTE, H_GAP, V_GAP, MIN_NODE_W, MAX_NODE_W };
 })();

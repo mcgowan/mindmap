@@ -131,15 +131,7 @@
   /* ---------------------------------------------------------------- tree helpers */
   const makeNode = (text = '') => ({ id: uid(), text, children: [] });
 
-  function findNode(root, id) {
-    let found = null;
-    (function walk(node, parent, depth) {
-      if (found) return;
-      if (node.id === id) { found = { node, parent, depth, index: parent ? parent.children.indexOf(node) : -1 }; return; }
-      node.children.forEach(c => walk(c, node, depth + 1));
-    })(root, null, 0);
-    return found;
-  }
+  const findNode = SelectionCore.findNode;   // { id, node, parent, depth, index } | null
   function countNodes(root) {
     let n = 0;
     (function walk(x) { n++; x.children.forEach(walk); })(root);
@@ -165,7 +157,8 @@
   const state = {
     map: null,
     layout: null,
-    selectedId: null,
+    selectedIds: [],      // selection set, insertion order; every id exists and is rendered
+    primaryId: null,      // the member single-node commands act on; null only when the set is empty
     editingId: null,
     editStartText: '',
     editSnapshot: null,
@@ -176,6 +169,8 @@
     pendingEditRoot: false,
     saveFailed: false,
   };
+  // `selectedId` stays the primary's alias so single-node readers (and the tactical skin) keep their contract.
+  Object.defineProperty(state, 'selectedId', { enumerable: true, get: () => state.primaryId, set: id => Selection.replace(id) });
   const nodeEls = new Map();   // id -> .node element
   const linkEls = new Map();   // child id -> <path>
   const pos = new Map();       // id -> {x, y} current animated position
@@ -341,7 +336,9 @@
     if (state.editingId) commitEdit();
     state.map = map;
     state.undo = []; state.redo = [];
-    state.selectedId = map.root.id;
+    state.selectedIds = [map.root.id]; state.primaryId = map.root.id;   // rendered by the relayout below
+    selectedSet = new Set(state.selectedIds);
+    el.viewport.classList.remove('multi-select');
     state.editingId = null;
     state.view = map.view ? { ...map.view } : { x: 0, y: 0, z: 1 };
     nodeEls.forEach(n => n.remove()); nodeEls.clear();
@@ -438,11 +435,10 @@
   }
   function applySnapshot(snap) {
     state.map.root = JSON.parse(snap);
-    if (!findNode(state.map.root, state.selectedId)) state.selectedId = state.map.root.id;
     syncTitleFromRoot();
     persist();
     relayout();
-    select(state.selectedId);
+    pruneToRendered({ evenWhenEmpty: true });   // vanished or hidden members drop out; empty → root; reveals the primary
     renderNotesPane({ force: true });
   }
   function undo() {
@@ -546,7 +542,8 @@
       + (ln.side ? ` side-${ln.side}` : '')
       + (ln.hasChildren ? ' has-children' : '')
       + (ln.collapsed ? ' collapsed' : '')
-      + (ln.id === state.selectedId ? ' selected' : '')
+      + ((previewIds ? previewIds.has(ln.id) : Selection.has(ln.id)) ? ' selected' : '')
+      + (ln.id === state.primaryId ? ' primary' : '')
       + (ln.id === state.editingId ? ' editing' : '')
       + (ln.node.style && ln.node.style.bold ? ' is-bold' : '')
       + (ln.node.style && ln.node.style.strike ? ' is-strike' : '')
@@ -564,19 +561,63 @@
     $('.badge', n).textContent = ln.collapsed ? ln.hiddenCount : '';
   }
 
-  /* ---------- selection ---------- */
-  function select(id, { reveal = true } = {}) {
-    if (id !== state.selectedId) {
+  /* ---------- selection: a set with one primary (SelectionCore owns the algebra) ---------- */
+  let previewIds = null;   // marquee preview: rendered as selected without being committed
+  let selectedSet = new Set();   // mirrors state.selectedIds for O(1) membership during relayout
+  const currentSelection = () => ({ ids: state.selectedIds, primaryId: state.primaryId });
+  const Selection = {
+    ids: () => state.selectedIds.slice(),
+    has: id => selectedSet.has(id),
+    size: () => state.selectedIds.length,
+    roots: () => SelectionCore.selectionRoots(state.map.root, state.selectedIds),
+    replace(id, opts) { applySelection(SelectionCore.replace(currentSelection(), state.map.root, id), opts); },
+    toggle(id) { applySelection(SelectionCore.toggle(currentSelection(), state.map.root, id), { reveal: false }); },
+    add(id) { applySelection(SelectionCore.add(currentSelection(), state.map.root, id), { reveal: false }); },
+    addRange(fromId, toId) { applySelection(SelectionCore.addRange(currentSelection(), state.map.root, fromId, toId), { reveal: false }); },
+    set(ids, { primary, reveal = false } = {}) { applySelection(SelectionCore.set(currentSelection(), state.map.root, ids, { primary }), { reveal }); },
+    prune(predicate, { fallbackPrimary, reveal = true } = {}) { applySelection(SelectionCore.prune(currentSelection(), state.map.root, predicate, { fallbackPrimary }), { reveal }); },
+  };
+  /** Commit a selection value: diff the classes, re-arm the style bar, reveal the primary, refresh dependents. */
+  function applySelection(next, { reveal = true } = {}) {
+    const prevIds = state.selectedIds, prevPrimary = state.primaryId;
+    const nextSet = new Set(next.ids);
+    const changed = next.primaryId !== prevPrimary || prevIds.length !== next.ids.length || prevIds.some(id => !nextSet.has(id));
+    if (changed) {
       disarmStylebar();
-      if (id && hoveredNodeId === id) armStylebarSoon();
+      if (hoveredNodeId && nextSet.has(hoveredNodeId)) armStylebarSoon();
     }
-    if (state.selectedId && nodeEls.has(state.selectedId)) nodeEls.get(state.selectedId).classList.remove('selected');
-    state.selectedId = id;
-    const n = nodeEls.get(id);
-    if (n) n.classList.add('selected');
-    if (reveal && id) ensureVisible(id);
+    state.selectedIds = next.ids;
+    state.primaryId = next.primaryId;
+    selectedSet = nextSet;
+    for (const id of prevIds) if (!nextSet.has(id)) { const n = nodeEls.get(id); if (n) n.classList.remove('selected', 'primary'); }
+    for (const id of next.ids) { const n = nodeEls.get(id); if (n) { n.classList.add('selected'); n.classList.toggle('primary', id === next.primaryId); } }
+    el.viewport.classList.toggle('multi-select', next.ids.length > 1);
+    if (reveal && next.primaryId) ensureVisible(next.primaryId);
     updateStyleBar();
     renderNotesPane();
+  }
+  /** Plain single-node selection (the historical entry point): the set becomes [id] with id as primary; null clears. */
+  function select(id, opts) { Selection.replace(id, opts); }
+  /**
+   * After a re-layout: drop members that vanished or are hidden; a hidden primary hands over to its rendered ancestor.
+   * An empty selection is left alone unless `evenWhenEmpty` (undo/redo, where the core's empty → root rule applies).
+   */
+  function pruneToRendered({ evenWhenEmpty = false, reveal = true } = {}) {
+    if (!state.selectedIds.length && !evenWhenEmpty) return;
+    Selection.prune(id => state.layout.byId.has(id), { fallbackPrimary: former => SelectionCore.renderedAncestor(state.map.root, former), reveal });
+  }
+  /** Marquee preview: while active the painted set is exactly `ids` (committed members outside it lose their ring); null restores the committed set. */
+  function setPreview(ids) {
+    const before = previewIds;
+    previewIds = ids ? new Set(ids) : null;
+    const shown = previewIds || new Set(state.selectedIds);
+    const touched = new Set([...(before || []), ...state.selectedIds, ...shown]);
+    for (const id of touched) {
+      const n = nodeEls.get(id);
+      if (!n) continue;
+      n.classList.toggle('selected', shown.has(id));
+      n.classList.toggle('primary', shown.has(id) && id === state.primaryId);
+    }
   }
 
   /* ---------- editing ---------- */
@@ -637,7 +678,6 @@
         // discard the node: silently roll back its creation
         const snap = state.undo.pop();
         state.map.root = JSON.parse(snap);
-        state.selectedId = parent.id;
         updateUndoButtons();
         persist();
         relayout();
@@ -850,14 +890,8 @@
   });
 
   /* ---------- mutations ---------- */
-  function chooseSide() {
-    let l = 0, r = 0;
-    for (const c of state.map.root.children) {
-      const size = countNodes(c);
-      if (c.side === 'L') l += size; else r += size;
-    }
-    return r <= l ? 'R' : 'L';
-  }
+  /** Emptier side of the root, by subtree size; `exclude` = first-level nodes not yet sided (they must not count). */
+  const chooseSide = (exclude = null) => SelectionCore.emptierSide(state.map.root, exclude);
   /** Least-used palette slot among first-level branches, so colors stay stable when branches move. */
   function pickColor() {
     const n = Layout.PALETTE.length;
@@ -896,37 +930,57 @@
     persist(); relayout(); select(n.id);
     return n;
   }
-  function deleteNode(id) {
-    const found = findNode(state.map.root, id);
-    if (!found || !found.parent) return;
+  /** Delete every selection root (never the map root) with its subtree as one undo step; the selection lands beside the first one. */
+  function deleteSelection() {
+    const units = Selection.roots().filter(u => u.parent);
+    if (!units.length) return;
+    const next = SelectionCore.nextSelectionAfterDelete(state.map.root, units.map(u => u.id));
     pushUndo();
-    const kids = found.parent.children;
-    kids.splice(found.index, 1);
-    const next = kids[found.index] || kids[found.index - 1] || found.parent;
-    persist(); relayout(); select(next.id);
+    for (const u of units) { const i = u.parent.children.indexOf(u.node); if (i >= 0) u.parent.children.splice(i, 1); }
+    persist(); relayout(); select(next);
   }
   function toggleCollapse(id) {
     const found = findNode(state.map.root, id);
     if (!found || !found.node.children.length) return;
     found.node.collapsed = !found.node.collapsed;
-    persist(); relayout(); select(id);
+    persist(); relayout(); pruneToRendered({ reveal: false });   // the selection is untouched except for members the collapse just hid; the view stays put
   }
-  function copyNode(id) {
-    const found = findNode(state.map.root, id);
-    if (!found) return;
-    const outline = outlineText(found.node);
+  /** Group form: every selected parent takes the state opposite to the reference — the badge's own node on a badge click, else the primary, else the first parent in document order. No undo step, as for one node. */
+  function toggleCollapseSelection(refId = null) {
+    if (Selection.size() <= 1) { toggleCollapse(refId || state.primaryId); return; }
+    const root = state.map.root;
+    const parents = Selection.ids().map(id => findNode(root, id)).filter(f => f && f.node.children.length);
+    if (!parents.length) return;
+    const named = [refId, state.primaryId].find(id => id && parents.some(f => f.id === id));
+    const ref = named || SelectionCore.documentOrder(root, parents.map(f => f.id))[0];
+    const collapsed = !findNode(root, ref).node.collapsed;
+    for (const f of parents) f.node.collapsed = collapsed;
+    persist(); relayout(); pruneToRendered({ reveal: false });
+  }
+  /** Copy `nodes` (copied subtrees — whole or selection-filtered, document order) to the node clipboard and their outline to the system clipboard. */
+  function copyNodes(nodes) {
+    if (!nodes.length) return;
+    const outline = SelectionCore.joinOutlines(nodes.map(outlineText));
     const at = Date.now();
-    writeNodeClip(found.node, outline, at);                  // optimistic: outline recorded; no map change, no undo step
+    writeNodeClip(nodes, outline, at);                       // optimistic: outline recorded; no map change, no undo step
     const write = navigator.clipboard && navigator.clipboard.writeText
       ? navigator.clipboard.writeText(outline)
       : Promise.reject(new Error('clipboard API unavailable'));
     write.catch(() => {
       if (!nodeClipMem || nodeClipMem.at !== at) return;   // a newer copy already replaced this payload
-      writeNodeClip(nodeClipMem.node, undefined, at);        // same sanitized subtree and `at`, minus the fingerprint
+      writeNodeClip(nodeClipMem.nodes, undefined, at);       // same sanitized subtrees and `at`, minus the fingerprint
       showToast("Couldn't write to the system clipboard");
     });
   }
-  /** One undoable append of already-sanitized clip nodes; selects the first. */
+  function copyNode(id) {
+    const found = findNode(state.map.root, id);
+    if (found) copyNodes([found.node]);
+  }
+  /** Every selection root (the whole map when the root is selected alone, else the effective roots, never the root itself), each filtered by the selection per `copiedSubtree`. */
+  function copySelection() {
+    copyNodes(Selection.roots().map(u => SelectionCore.copiedSubtree(u.node, state.selectedIds)));
+  }
+  /** One undoable append of already-sanitized clip nodes under `found`; the caller sets the selection. */
   function appendClipNodes(found, clipNodes) {
     pushUndo();
     const made = clipNodes.map(cloneWithNewIds);
@@ -935,20 +989,26 @@
       if (!found.parent) { n.side = chooseSide(); n.color = pickColor(); }   // reads root.children: push one at a time so successive nodes balance
       found.node.children.push(n);
     }
-    persist(); relayout(); select(made[0].id);
+    persist(); relayout();
     return made;
   }
-  function pasteNode(targetId) {
+  /** Paste every clipboard subtree under the target; the pasted top-level nodes become the selection, the first as primary. */
+  function pasteClip(targetId) {
     const clip = readNodeClip();
     const found = findNode(state.map.root, targetId);
     if (!clip || !found) return;
-    return appendClipNodes(found, [clip.node])[0];
+    const made = appendClipNodes(found, clip.nodes);
+    Selection.set(made.map(n => n.id), { primary: made[0].id, reveal: true });
+    return made;
   }
+  function pasteNode(targetId) { const made = pasteClip(targetId); return made && made[0]; }
   function pasteText(targetId, roots) {
     const found = findNode(state.map.root, targetId);
     if (!found || !roots.length) return;
     if (countNodes({ children: roots }) - 1 > PASTE_NODE_LIMIT) { showToast(`Paste exceeds the ${PASTE_NODE_LIMIT}-node limit`); return; }   // synthetic parent, minus itself
-    return appendClipNodes(found, roots);
+    const made = appendClipNodes(found, roots);
+    select(made[0].id);
+    return made;
   }
   function moveSibling(id, dir) {
     const found = findNode(state.map.root, id);
@@ -961,14 +1021,14 @@
     pushUndo();
     kids.splice(found.index, 1);
     kids.splice(j, 0, found.node);
-    persist(); relayout(); select(id);
+    persist(); relayout(); pruneToRendered();   // the primary moved; the rest of the selection stays
   }
   function setSide(id, side) {
     const found = findNode(state.map.root, id);
     if (!found || found.depth !== 1 || found.node.side === side) return;
     pushUndo();
     found.node.side = side;
-    persist(); relayout(); select(id);
+    persist(); relayout(); pruneToRendered();
   }
 
   /* ---------- inline marks: offset runs over node.text ---------- */
@@ -1216,17 +1276,27 @@
     const f = findNode(state.map.root, id);
     return f ? (f.node.style || {}) : {};
   }
-  function setStyle(id, patch) {
-    const f = findNode(state.map.root, id);
-    if (!f) return;
-    if (state.editingId !== id) pushUndo();          // while editing, the edit's snapshot covers the change (one undo step per session)
-    const next = { ...(f.node.style || {}), ...patch };
-    for (const k of Object.keys(next)) if (next[k] === undefined || next[k] === false || next[k] === null || next[k] === '') delete next[k];
-    if (Object.keys(next).length) f.node.style = next; else delete f.node.style;
-    persist(); relayout(); updateStyleBar();
+  function setStyleRaw(node, patch) {
+    const next = SelectionCore.applyStylePatch(node.style, patch);
+    if (next) node.style = next; else delete node.style;
   }
-  function toggleStyle(id, key) { setStyle(id, { [key]: !getStyle(id)[key] }); }
-  function clearStyle(id) { if (Object.keys(getStyle(id)).length) setStyle(id, { bg: '', color: '', bold: false, strike: false }); }
+  /** One undoable pass over several nodes. A change to the node being edited, alone, is covered by the edit session's snapshot instead. */
+  function mutateNodes(ids, mutate) {
+    const found = ids.map(id => findNode(state.map.root, id)).filter(Boolean);
+    if (!found.length) return false;
+    const editingOnly = found.length === 1 && state.editingId === found[0].node.id;
+    if (!editingOnly) pushUndo();
+    for (const f of found) mutate(f.node);
+    persist(); relayout(); updateStyleBar();
+    return true;
+  }
+  function setStyleMany(ids, patch) { mutateNodes(ids, n => setStyleRaw(n, patch)); }
+  function setStyle(id, patch) { setStyleMany([id], patch); }
+  /** Every node takes the opposite of the reference node's flag (the primary), so a mixed group ends up uniform. */
+  function toggleStyleMany(ids, key, refId) { setStyleMany(ids, { [key]: !getStyle(refId)[key] }); }
+  function toggleStyle(id, key) { toggleStyleMany([id], key, id); }
+  const isStyled = id => { const ln = state.layout && state.layout.byId.get(id); return !!(ln && ln.node.style && Object.keys(ln.node.style).length); };
+  function clearStyleMany(ids) { if (ids.some(isStyled)) setStyleMany(ids, { bg: '', color: '', bold: false, strike: false }); }
   function styleClipboard() { try { return JSON.parse(localStorage.getItem(STYLE_CLIP_KEY)); } catch (e) { return null; } }
   function copyStyle(id) {
     if (!findNode(state.map.root, id)) return;
@@ -1234,22 +1304,20 @@
     updateStyleBar();
     flashStyleBtn('copy');
   }
-  function pasteStyle(id) {
+  function pasteStyleMany(ids) {
     const clip = styleClipboard();
-    if (!clip || !findNode(state.map.root, id)) return;
-    const f = findNode(state.map.root, id);
-    if (state.editingId !== id) pushUndo();
-    if (Object.keys(clip).length) f.node.style = { ...clip }; else delete f.node.style;
-    persist(); relayout(); updateStyleBar();
-    flashStyleBtn('paste');
+    if (!clip) return;
+    const applied = mutateNodes(ids, n => { if (Object.keys(clip).length) n.style = { ...clip }; else delete n.style; });
+    if (applied) flashStyleBtn('paste');
   }
+  function pasteStyle(id) { pasteStyleMany([id]); }
   function flashStyleBtn(name) {
     const b = $(`[data-sb="${name}"]`, el.stylebar);
     b.classList.add('flash');
     setTimeout(() => b.classList.remove('flash'), 350);
   }
 
-  /* ---------- node clipboard: one sanitized subtree, shared across maps via localStorage ---------- */
+  /* ---------- node clipboard: sanitized subtrees (v2: several roots; v1 single-root payloads still read), shared across maps via localStorage ---------- */
   const NODE_CLIP_KEY = 'mindmap.nodeClipboard';
   let nodeClipMem = null;   // session fallback when the localStorage write fails
 
@@ -1263,35 +1331,18 @@
     if (Number.isFinite(node.width)) out.width = node.width;
     return out;
   }
-  function isValidMarks(marks) {
-    return Array.isArray(marks) && marks.every(r => r && typeof r === 'object'
-      && Number.isInteger(r.s) && Number.isInteger(r.e) && r.s >= 0 && r.s < r.e
-      && ['b', 'i', 'u', 'k'].every(k => r[k] === undefined || r[k] === true)
-      && (r.c === undefined || (typeof r.c === 'string' && /^#[0-9a-f]{6}$/i.test(r.c))));
-  }
-  function isValidClipNode(n) {
-    if (!n || typeof n !== 'object' || typeof n.text !== 'string' || !Array.isArray(n.children)) return false;
-    if (n.style !== undefined && (!n.style || typeof n.style !== 'object')) return false;
-    if (n.marks !== undefined && !isValidMarks(n.marks)) return false;
-    if (n.notes !== undefined && typeof n.notes !== 'string') return false;
-    if (n.width !== undefined && !Number.isFinite(n.width)) return false;
-    return n.children.every(isValidClipNode);
-  }
-  function isValidClipPayload(p) {
-    return !!p && p.v === 1 && Number.isFinite(p.at) && isValidClipNode(p.node)
-      && (p.outline === undefined || typeof p.outline === 'string');
-  }
-  function writeNodeClip(node, outline, at = Date.now()) {
-    const payload = { v: 1, at, node: sanitizeSubtree(node) };
+  /** Always writes the v2 shape { v: 2, at, nodes[], outline? }; a single root is a one-element `nodes`. */
+  function writeNodeClip(nodes, outline, at = Date.now()) {
+    const payload = { v: 2, at, nodes: (Array.isArray(nodes) ? nodes : [nodes]).map(sanitizeSubtree) };
     if (typeof outline === 'string') payload.outline = outline;   // absent = system clipboard write failed (or pre-upgrade payload)
     nodeClipMem = payload;
     try { localStorage.setItem(NODE_CLIP_KEY, JSON.stringify(payload)); } catch (e) { /* quota / disabled storage: memory copy serves this session */ }
   }
+  /** Newest valid payload across storage and memory, normalized to v2 (v1 `{ node }` reads as `nodes: [node]`). */
   function readNodeClip() {
     let stored = null;
-    try { stored = JSON.parse(localStorage.getItem(NODE_CLIP_KEY)); } catch (e) { stored = null; }
-    if (!isValidClipPayload(stored)) stored = null;
-    const mem = isValidClipPayload(nodeClipMem) ? nodeClipMem : null;
+    try { stored = SelectionCore.normalizeClipPayload(JSON.parse(localStorage.getItem(NODE_CLIP_KEY))); } catch (e) { stored = null; }
+    const mem = SelectionCore.normalizeClipPayload(nodeClipMem);
     if (stored && mem) return stored.at >= mem.at ? stored : mem;   // newest wins across tabs and failed writes
     return stored || mem;
   }
@@ -1353,24 +1404,26 @@
   const STYLEBAR_GRACE_MS = 300;    // time allowed to cross the gap from the node into the bar
   let hoveredNodeId = null;
   let stylebarArmed = false;
+  let stylebarAnchorId = null;   // the member the armed bar sits over; latched so a re-render never moves it out from under the pointer
   let armTimer = null;
   let hideTimer = null;
 
   function armStylebarSoon() {
     clearTimeout(armTimer);
     armTimer = setTimeout(() => {
-      if (hoveredNodeId === state.selectedId && !stylebarArmed) { stylebarArmed = true; updateStyleBar(); }
+      if (Selection.has(hoveredNodeId) && !stylebarArmed) { stylebarArmed = true; stylebarAnchorId = hoveredNodeId; updateStyleBar(); }
     }, STYLEBAR_DWELL_MS);
   }
   function disarmStylebar() {
     clearTimeout(armTimer);
     clearTimeout(hideTimer);
+    stylebarAnchorId = null;
     if (stylebarArmed) { stylebarArmed = false; closeStylePop(); updateStyleBar(); }
   }
   function scheduleStylebarHide() {
     clearTimeout(hideTimer);
     hideTimer = setTimeout(() => {
-      if (hoveredNodeId === state.selectedId || el.stylebar.matches(':hover') || !el.sbPop.hidden) return;
+      if (Selection.has(hoveredNodeId) || el.stylebar.matches(':hover') || !el.sbPop.hidden) return;
       disarmStylebar();
     }, STYLEBAR_GRACE_MS);
   }
@@ -1378,16 +1431,17 @@
     const n = e.target.closest('.node');
     if (!n || n.dataset.id === hoveredNodeId) return;
     hoveredNodeId = n.dataset.id;
-    if (hoveredNodeId === state.selectedId) {
+    if (Selection.has(hoveredNodeId)) {
       clearTimeout(hideTimer);
       if (!stylebarArmed) armStylebarSoon();
+      else { stylebarAnchorId = hoveredNodeId; updateStyleBar(); }   // armed: re-anchor to the member now under the pointer
     }
   });
   // any movement restarts the stillness clock
   el.nodes.addEventListener('mousemove', e => {
-    if (stylebarArmed || hoveredNodeId !== state.selectedId) return;
+    if (stylebarArmed || !Selection.has(hoveredNodeId)) return;
     const n = e.target.closest('.node');
-    if (n && n.dataset.id === state.selectedId) armStylebarSoon();
+    if (n && n.dataset.id === hoveredNodeId) armStylebarSoon();
   });
   el.nodes.addEventListener('mouseout', e => {
     const n = e.target.closest('.node');
@@ -1400,19 +1454,26 @@
   el.stylebar.addEventListener('mouseleave', () => { if (stylebarArmed) scheduleStylebarHide(); });
 
   function updateStyleBar() {
-    const id = state.selectedId;
-    const ln = state.layout && id ? state.layout.byId.get(id) : null;
-    const editing = !!ln && state.editingId === id;
-    const show = !!ln && (editing || (stylebarArmed && !state.editingId)) && !(nodeDrag && nodeDrag.active) && !el.editor.hidden;
+    const id = state.primaryId;
+    const editing = !!id && state.editingId === id;
+    // the bar sits over the latched member (any of them) but always shows and edits the primary's style;
+    // a latched member that is no longer selected yields to the primary, one that is no longer rendered hides the bar
+    if (stylebarAnchorId && !Selection.has(stylebarAnchorId)) stylebarAnchorId = null;
+    const anchorId = !editing && stylebarArmed && stylebarAnchorId ? stylebarAnchorId : id;
+    const ln = state.layout && anchorId ? state.layout.byId.get(anchorId) : null;
+    const show = !!ln && (editing || (stylebarArmed && !state.editingId)) && !(nodeDrag && nodeDrag.active) && !marquee && !el.editor.hidden;
     el.stylebar.hidden = !show;
     $('[data-sb="italic"]', el.stylebar).hidden = !editing;
     $('[data-sb="underline"]', el.stylebar).hidden = !editing;
+    const count = $('.sb-count', el.stylebar);
+    count.hidden = state.selectedIds.length <= 1;
+    count.textContent = state.selectedIds.length;
     if (!show) { closeStylePop(); return; }
-    const st = ln.node.style || {};
+    const st = getStyle(id);
     const ef = editingFlags();                       // selection-aware flags while editing, null otherwise
     const r = viewportRect();
     const v = state.view;
-    const p = pos.get(id);
+    const p = pos.get(anchorId);
     const cx = r.width / 2 + v.x + p.x * v.z;
     const top = r.height / 2 + v.y + (p.y - ln.h / 2) * v.z;
     const bw = el.stylebar.offsetWidth, bh = el.stylebar.offsetHeight;
@@ -1435,7 +1496,7 @@
     $('[data-sb="italic"]', el.stylebar).classList.toggle('active', !!(ef && ef.i));
     $('[data-sb="underline"]', el.stylebar).classList.toggle('active', !!(ef && ef.u));
     $('[data-sb="paste"]', el.stylebar).disabled = !styleClipboard();
-    $('[data-sb="clear"]', el.stylebar).disabled = !Object.keys(st).length;
+    $('[data-sb="clear"]', el.stylebar).disabled = !state.selectedIds.some(isStyled);
   }
   /** Marks carried by the whole current selection of the node being edited; partial = a real range short of the whole text. */
   function editingFlags() {
@@ -1452,7 +1513,7 @@
   function closeStylePop() {
     el.sbPop.hidden = true;
     $$('.sb-btn.open', el.stylebar).forEach(b => b.classList.remove('open'));
-    if (stylebarArmed && hoveredNodeId !== state.selectedId && !el.stylebar.matches(':hover')) scheduleStylebarHide();
+    if (stylebarArmed && !Selection.has(hoveredNodeId) && !el.stylebar.matches(':hover')) scheduleStylebarHide();
   }
   function openStylePop(kind) {
     const id = state.selectedId;
@@ -1472,9 +1533,10 @@
   el.stylebar.addEventListener('click', e => {
     const sw = e.target.closest('.sb-sw');
     const editing = state.editingId && state.editingId === state.selectedId;
+    const ids = Selection.ids();   // node-level actions apply to every selected node; marks (while editing) to the one being edited
     if (sw) {
       if (editing && el.sbPop.dataset.kind === 'color') applyMarkAction(state.selectedId, 'color', sw.dataset.value);
-      else setStyle(state.selectedId, { [el.sbPop.dataset.kind]: sw.dataset.value });
+      else setStyleMany(ids, { [el.sbPop.dataset.kind]: sw.dataset.value });
       closeStylePop();
       return;
     }
@@ -1485,13 +1547,13 @@
       case 'bg': case 'color':
         if (b.classList.contains('open')) closeStylePop(); else openStylePop(b.dataset.sb);
         break;
-      case 'bold': if (editing) applyMarkAction(id, 'bold'); else toggleStyle(id, 'bold'); break;
-      case 'strike': if (editing) applyMarkAction(id, 'strike'); else toggleStyle(id, 'strike'); break;
+      case 'bold': if (editing) applyMarkAction(id, 'bold'); else toggleStyleMany(ids, 'bold', id); break;
+      case 'strike': if (editing) applyMarkAction(id, 'strike'); else toggleStyleMany(ids, 'strike', id); break;
       case 'italic': if (editing) applyMarkAction(id, 'italic'); break;
       case 'underline': if (editing) applyMarkAction(id, 'underline'); break;
       case 'copy': copyStyle(id); break;
-      case 'paste': pasteStyle(id); break;
-      case 'clear': clearStyle(id); break;
+      case 'paste': pasteStyleMany(ids); break;
+      case 'clear': clearStyleMany(ids); break;
     }
   });
   // keep the bar from stealing keyboard focus from the canvas
@@ -1664,6 +1726,7 @@
 
   el.viewport.addEventListener('wheel', e => {
     e.preventDefault();
+    if (marquee) return;   // the rubber band is drawn in screen space: the view must hold still under it
     if (e.ctrlKey || e.metaKey) {
       const r = viewportRect();
       zoomAt(Math.exp(-e.deltaY * 0.01), e.clientX - r.left, e.clientY - r.top);
@@ -1676,11 +1739,12 @@
 
   // pointer: pan on background, select on node, drag a node to reparent it
   let drag = null;       // background pan
-  let nodeDrag = null;   // { id, x, y, active, ghost, targetId, subtree:Set }
+  let nodeDrag = null;   // { id (pressed), unitIds, x, y, active, ghost, target, targetKey, subtree:Set, collapseOnRelease }
+  let marquee = null;    // { x0, y0, x1, y1, base: string[], moved, el, hits } — Shift+drag on the background
   let resizeDrag = null;    // { id, edge, startX, startW, live, moved, el }
   let pendingLink = null;   // { href, x, y } armed by a modifier+pointerdown on a link, consumed by the matching pointerup
   let lastLinkOpen = { href: '', t: -Infinity };
-  const DBLCLICK_MS = 500;  // a modifier double-click arms twice; the second release must not open a second tab
+  const DBLCLICK_MS = 500;  // browser double-click window: a modifier double-click must not open a second tab; a handle fit's dblclick must not edit
   const isModClick = e => e.button === 0 && (IS_MAC ? e.metaKey : e.ctrlKey);
   // body.mod-held drives the pointer cursor over links while the platform modifier is down
   const setModHeld = on => document.body.classList.toggle('mod-held', on);
@@ -1689,7 +1753,8 @@
   document.addEventListener('keyup', onModKey);
   window.addEventListener('blur', () => setModHeld(false));
   document.addEventListener('visibilitychange', () => { if (document.hidden) setModHeld(false); });
-  let lastHandleTap = null; // { id, edge, t } — double-tap/click reset detection
+  let lastHandleTap = null; // { id, edge, t } — double-tap/click fit-width detection
+  let lastHandleFitAt = -Infinity;  // the fit relayout moves the node under the pointer before dblclick fires; that dblclick must not edit
   const RESIZE_TAP_MS = 300;
   const DRAG_THRESHOLD = 6;
 
@@ -1701,12 +1766,13 @@
   function beginNodeDrag(e) {
     const ln = state.layout.byId.get(nodeDrag.id);
     nodeDrag.active = true;
-    nodeDrag.subtree = subtreeIds(nodeDrag.id);
+    nodeDrag.subtree = new Set();
+    for (const unitId of nodeDrag.unitIds) subtreeIds(unitId).forEach(sid => nodeDrag.subtree.add(sid));
     nodeDrag.subtree.forEach(id => nodeEls.get(id).classList.add('dragging'));
     const ghost = document.createElement('div');
     ghost.className = 'drag-ghost';
     ghost.style.setProperty('--branch', ln.color || 'var(--accent)');
-    const extra = nodeDrag.subtree.size - 1;
+    const extra = nodeDrag.subtree.size - 1;   // every dragged node but the pressed one
     ghost.innerHTML = `<span class="ghost-text">${escapeHTML(ln.node.text || 'Untitled')}</span>${extra ? `<span class="ghost-count">+${extra}</span>` : ''}`;
     document.body.appendChild(ghost);
     nodeDrag.ghost = ghost;
@@ -1720,16 +1786,16 @@
     const n = hit && hit.closest('.node');
     if (!n) return null;
     const id = n.dataset.id;
-    if (nodeDrag.subtree.has(id)) return null;               // itself or its own descendants
+    if (nodeDrag.subtree.has(id)) return null;               // inside a dragged unit
     const target = state.layout.byId.get(id);
-    const dragged = state.layout.byId.get(nodeDrag.id);
     let zone = 'onto';
     if (target.parent) {                                     // the root has no peers
       const r = n.getBoundingClientRect();
       const rel = (y - r.top) / r.height;
       if (rel < 0.3) zone = 'before'; else if (rel > 0.7) zone = 'after';
     }
-    if (zone === 'onto' && dragged.parent && dragged.parent.id === id) return null; // already its child
+    const parentOfAll = nodeDrag.unitIds.every(unitId => { const p = state.layout.byId.get(unitId).parent; return p && p.id === id; });
+    if (zone === 'onto' && parentOfAll) return null;         // already exactly its children
     return { id, zone };
   }
   let dropLine = null;
@@ -1769,56 +1835,37 @@
     nodeDrag.ghost.classList.toggle('can-drop', !!target);
   }
   function endNodeDrag(commit) {
-    const { id, target, ghost, subtree } = nodeDrag;
+    const { unitIds, target, ghost, subtree } = nodeDrag;
     clearDropHighlight();
     nodeDrag = null;
     if (ghost) ghost.remove();
     el.viewport.classList.remove('dragging');
     if (subtree) subtree.forEach(sid => { const n = nodeEls.get(sid); if (n) n.classList.remove('dragging'); });
-    if (commit && target) {
-      if (target.zone === 'onto') reparent(id, target.id);
-      else moveBeside(id, target.id, target.zone === 'after');
-    } else updateStyleBar();
+    if (!(commit && target && moveUnits(unitIds, target.id, target.zone))) updateStyleBar();   // no move happened: the bar just comes back
   }
-  /** Move a node (with its branch) to sit right before/after another node, under that node's parent. */
-  function moveBeside(id, targetId, after) {
-    const src = findNode(state.map.root, id);
-    const tgt = findNode(state.map.root, targetId);
-    if (!src || !tgt || !src.parent || !tgt.parent) return;
-    if (findNode(src.node, targetId)) return;                // would create a cycle
-    const oldParent = src.parent, oldIndex = src.index, newParent = tgt.parent;
-    const toRoot = newParent === state.map.root;
-    let index = tgt.index + (after ? 1 : 0);
-    if (newParent === oldParent) {
-      if (oldIndex < index) index--;
-      const sameSide = !toRoot || (src.node.side || 'R') === (tgt.node.side || 'R');
-      if (index === oldIndex && sameSide) return;            // nothing would change
+  /**
+   * Move the units (each a node with its subtree) onto / before / after the target as one undo step, keeping the selection.
+   * SelectionCore.planMove does the tree surgery and rejects no-ops; this side owns undo, first-level side/color, expansion.
+   */
+  function moveUnits(unitIds, targetId, zone) {
+    const snap = snapshot();                                 // taken before planMove mutates; pushed only when something moved
+    const r = SelectionCore.planMove(state.map.root, unitIds, targetId, zone);
+    if (!r) return false;
+    pushUndo(snap);
+    const pending = new Set(r.entered.map(u => u.node));
+    for (const u of r.entered) {
+      // the unit's own side is chosen while it is still excluded from the tally; once placed it counts for the next unit
+      if (zone === 'onto') { u.node.side = chooseSide(pending); u.node.color = pickColor(); }
+      else { u.node.side = r.target.node.side || 'R'; if (u.node.color === undefined) u.node.color = pickColor(); }
+      pending.delete(u.node);
     }
-    pushUndo();
-    oldParent.children.splice(oldIndex, 1);
-    if (toRoot) {
-      src.node.side = tgt.node.side || 'R';
-      if (src.node.color === undefined) src.node.color = pickColor();
-    } else { delete src.node.side; delete src.node.color; }
-    newParent.collapsed = false;
-    newParent.children.splice(index, 0, src.node);
-    persist(); relayout(); select(id);
-  }
-  function reparent(id, targetId) {
-    const src = findNode(state.map.root, id);
-    const dst = findNode(state.map.root, targetId);
-    if (!src || !dst || !src.parent || dst.node === src.parent) return;
-    if (findNode(src.node, targetId)) return;                // would create a cycle
-    pushUndo();
-    src.parent.children.splice(src.index, 1);
-    if (!dst.parent) { src.node.side = chooseSide(); src.node.color = pickColor(); }
-    else { delete src.node.side; delete src.node.color; }
-    dst.node.collapsed = false;
-    dst.node.children.push(src.node);
-    persist(); relayout(); select(id);
+    for (const u of r.left) { delete u.node.side; delete u.node.color; }
+    r.newParent.collapsed = false;
+    persist(); relayout(); pruneToRendered();               // same nodes, same primary; reveals it
+    return true;
   }
 
-  /* drag a resize handle to set a custom node width; double-tap/click on it resets to auto */
+  /* drag a resize handle to set a custom node width; double-tap/click on it fits the text on one line (or back to auto) */
   function beginResize(e, id, edge) {
     e.preventDefault();
     if (state.editingId) commitEdit();
@@ -1858,27 +1905,43 @@
       }
       return;
     }
-    if (!commit) { lastHandleTap = null; return; }  // cancelled press never taps or resets
+    if (!commit) { lastHandleTap = null; return; }  // cancelled press never taps or fits
     const now = performance.now();
     if (lastHandleTap && lastHandleTap.id === rd.id && lastHandleTap.edge === rd.edge && now - lastHandleTap.t < RESIZE_TAP_MS) {
       lastHandleTap = null;
-      if (node.width !== undefined) { pushUndo(); delete node.width; persist(); relayout(); select(rd.id); }
+      lastHandleFitAt = now;
+      fitNodeWidth(rd.id);
     } else {
       lastHandleTap = { id: rd.id, edge: rd.edge, t: now };
     }
+  }
+  // Double-tap on the handle: custom width = one-line width (clamped), or back to automatic when auto already
+  // renders one line or the node is already at its fit width. A no-op leaves data, undo and layout untouched.
+  function fitNodeWidth(id) {
+    const ln = state.layout.byId.get(id);
+    const node = ln.node;
+    const bold = !!(node.style && node.style.bold);
+    const fit = Layout.fitWidth(node.text, ln.depth, bold, node.marks);
+    const auto = Layout.measure(node.text, ln.depth, bold, undefined, node.marks).w;
+    const current = Layout.clampWidth(node.width);
+    const next = Layout.resolveFitWidth(current, fit, auto);
+    if (next === current) return;
+    pushUndo();
+    if (next === undefined) delete node.width; else node.width = next;
+    persist(); relayout(); select(id);
   }
 
   el.viewport.addEventListener('pointerdown', e => {
     if (e.button !== 0) return;
     pendingLink = null;
-    if (resizeDrag || nodeDrag || drag) return;              // one gesture at a time owns the interaction
+    if (resizeDrag || nodeDrag || drag || marquee) return;   // one gesture at a time owns the interaction
     if (e.target.closest('.stylebar')) return;
     closeStylePop();
     if (document.activeElement === el.title) el.title.blur();
     const nodeEl = e.target.closest('.node');
     if (nodeEl) {
       const id = nodeEl.dataset.id;
-      if (e.target.closest('.badge')) { e.preventDefault(); toggleCollapse(id); return; }
+      if (e.target.closest('.badge')) { e.preventDefault(); if (Selection.has(id) && Selection.size() > 1) toggleCollapseSelection(id); else toggleCollapse(id); return; }
       if (e.target.closest('.note-mark')) { e.preventDefault(); if (state.editingId) commitEdit(); select(id, { reveal: false }); setNotesPaneOpen(true); return; }
       const rh = e.target.closest('.resize-handle');
       if (rh) { beginResize(e, id, rh.dataset.edge); return; }
@@ -1895,18 +1958,33 @@
       }
       e.preventDefault();
       if (state.editingId) commitEdit();
-      select(id, { reveal: false });
-      if (id !== state.map.root.id) {
-        nodeDrag = { id, x: e.clientX, y: e.clientY, active: false, ghost: null, target: null, targetKey: null, subtree: null };
+      const isRoot = id === state.map.root.id;
+      const primary = state.primaryId;
+      const primaryFound = primary && findNode(state.map.root, primary), pressedFound = findNode(state.map.root, id);
+      const op = SelectionCore.resolvePress({
+        meta: e.metaKey || e.ctrlKey, shift: e.shiftKey,
+        isMember: Selection.has(id), isMulti: Selection.size() > 1,
+        sameParent: !!(primaryFound && pressedFound && primaryFound.parent && primaryFound.parent === pressedFound.parent),
+      });
+      if (op === 'toggle') { Selection.toggle(id); return; }               // modifier presses select only — never arm a drag
+      if (op === 'addRange') { Selection.addRange(primary, id); return; }
+      if (op === 'add') { Selection.add(id); return; }
+      if (op === 'replace' || isRoot) select(id, { reveal: false });     // the root cannot drag, so 'keep' collapses at once
+      if (!isRoot) {
+        // 'keep': the whole selection stays for a possible group drag — every selection root travels (never the map root: it is a root only when selected alone, and it never arms a drag); a plain release collapses it to this node
+        const unitIds = op === 'keep' ? Selection.roots().map(u => u.id) : [id];
+        nodeDrag = { id, unitIds, x: e.clientX, y: e.clientY, active: false, ghost: null, target: null, targetKey: null, subtree: null, collapseOnRelease: op === 'keep' };
         el.viewport.setPointerCapture(e.pointerId);
       }
       return;
     }
+    if (e.shiftKey) { beginMarquee(e); return; }
     drag = { x: e.clientX, y: e.clientY, vx: state.view.x, vy: state.view.y, moved: false };
     el.viewport.setPointerCapture(e.pointerId);
   });
   el.viewport.addEventListener('pointermove', e => {
     if (resizeDrag) { if (e.pointerId === resizeDrag.pointerId) moveResize(e); return; }
+    if (marquee) { moveMarquee(e); return; }
     if (nodeDrag) {
       if (!nodeDrag.active) {
         if (Math.hypot(e.clientX - nodeDrag.x, e.clientY - nodeDrag.y) < DRAG_THRESHOLD) return;
@@ -1924,7 +2002,14 @@
   el.viewport.addEventListener('pointerup', e => {
     if (pendingLink) { openPendingLink(e); return; }
     if (resizeDrag) { if (e.pointerId === resizeDrag.pointerId) endResize(true); return; }
-    if (nodeDrag) { if (nodeDrag.active) endNodeDrag(true); else nodeDrag = null; return; }
+    if (marquee) { endMarquee(true); return; }
+    if (nodeDrag) {
+      if (nodeDrag.active) { endNodeDrag(true); return; }
+      const { id, collapseOnRelease } = nodeDrag;
+      nodeDrag = null;
+      if (collapseOnRelease) select(id, { reveal: false });
+      return;
+    }
     if (!drag) return;
     if (!drag.moved) {
       if (state.editingId) commitEdit();
@@ -1937,6 +2022,7 @@
   el.viewport.addEventListener('pointercancel', e => {
     pendingLink = null;
     if (resizeDrag) { if (e.pointerId === resizeDrag.pointerId) endResize(false); return; }
+    if (marquee) endMarquee(false);
     if (nodeDrag) endNodeDrag(false);
     drag = null;
     el.viewport.classList.remove('panning');
@@ -1945,10 +2031,53 @@
     if (e.key !== 'Escape') return;
     // consume the Escape that cancels a gesture so downstream handlers don't also act on it
     if (resizeDrag) { e.preventDefault(); e.stopPropagation(); endResize(false); return; }
+    if (marquee) { e.preventDefault(); e.stopPropagation(); endMarquee(false); return; }
     if (nodeDrag && nodeDrag.active) { e.preventDefault(); e.stopPropagation(); endNodeDrag(false); }
   }, true);
 
+  /* ---------- marquee: Shift+drag on the background selects every rendered node the rectangle touches ---------- */
+  function beginMarquee(e) {
+    if (state.editingId) commitEdit();   // like a background click: the edit ends before the selection can change
+    const box = document.createElement('div');
+    box.className = 'marquee';
+    box.hidden = true;
+    el.viewport.appendChild(box);
+    // Cmd/Ctrl adds to the current selection; otherwise the rectangle replaces it
+    marquee = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY, base: (e.metaKey || e.ctrlKey) ? Selection.ids() : [], moved: false, el: box, hits: [] };
+    el.viewport.setPointerCapture(e.pointerId);
+    updateStyleBar();
+  }
+  function moveMarquee(e) {
+    marquee.x1 = e.clientX; marquee.y1 = e.clientY;
+    if (!marquee.moved && Math.hypot(marquee.x1 - marquee.x0, marquee.y1 - marquee.y0) < 3) return;
+    marquee.moved = true;
+    const r = viewportRect();
+    const l = Math.min(marquee.x0, marquee.x1) - r.left, t = Math.min(marquee.y0, marquee.y1) - r.top;
+    const w = Math.abs(marquee.x1 - marquee.x0), h = Math.abs(marquee.y1 - marquee.y0);
+    Object.assign(marquee.el.style, { left: `${l}px`, top: `${t}px`, width: `${w}px`, height: `${h}px` });
+    marquee.el.hidden = false;
+    // screen → world through the current pan/zoom, then a plain AABB test over the layout boxes
+    const v = state.view, cx = r.width / 2, cy = r.height / 2;
+    const toWorld = (sx, sy) => ({ x: (sx - r.left - cx - v.x) / v.z, y: (sy - r.top - cy - v.y) / v.z });
+    const a = toWorld(marquee.x0, marquee.y0), b = toWorld(marquee.x1, marquee.y1);
+    marquee.hits = SelectionCore.rectHits(state.layout.nodes, { x0: a.x, y0: a.y, x1: b.x, y1: b.y });
+    setPreview(marquee.base.concat(marquee.hits));
+  }
+  function endMarquee(commit) {
+    const { moved, base, hits, el: box } = marquee;
+    marquee = null;
+    box.remove();
+    setPreview(null);
+    if (commit && moved) {
+      const ids = base.concat(hits);
+      if (ids.length) Selection.set(ids); else select(null);
+    } else updateStyleBar();   // a click-sized or cancelled marquee leaves the selection as it was
+  }
+
   el.viewport.addEventListener('dblclick', e => {
+    // this double-click was a handle fit and the node has since moved under the pointer; consume the stamp so only
+    // that one dblclick is swallowed — the time bound covers the case where no dblclick ever fires (pen/touch)
+    if (performance.now() - lastHandleFitAt < DBLCLICK_MS) { lastHandleFitAt = -Infinity; return; }
     // pointer capture armed for node drag retargets dblclick to the viewport; hit-test the real element
     const hit = document.elementFromPoint(e.clientX, e.clientY) || e.target;
     const nodeEl = hit.closest('.node');
@@ -2001,33 +2130,40 @@
       [['Tab'], 'Finish and start a child (while editing)'],
       [['Shift', 'Enter'], 'Finish and start a child (while editing)'],
       [['Esc'], 'Finish editing'],
-      [['⌫'], 'Delete the node and its branch'],
+      [['⌫'], 'Delete the selected nodes and their branches'],
       [[MOD, 'I'], 'Open the notes pane for the node'],
       [['Esc'], 'Leave the notes pane (while writing notes)'],
-      [[MOD, 'C'], 'Copy the branch (also as text)'],
-      [[MOD, 'V'], 'Paste the branch or clipboard text as children'],
+      [[MOD, 'C'], 'Copy the selected branches (also as text)'],
+      [[MOD, 'V'], 'Paste the branches or clipboard text as children'],
+    ]],
+    ['Select', [
+      [['Click'], 'Select a node (replaces the selection)'],
+      [[MOD, 'Click'], 'Add or remove a node'],
+      [['Shift', 'Click'], 'Add the sibling range from the primary node, or any other node'],
+      [['Shift', 'Drag'], 'Marquee — select every node in the rectangle (' + MOD + ' adds to the selection)'],
+      [[MOD, 'A'], 'Select every visible node'],
+      [['Esc'], 'Clear the selection'],
     ]],
     ['Navigate', [
       [['↑', '↓'], 'Move between siblings'],
       [['←', '→'], 'Move toward parent or children'],
       [['Home'], 'Jump to the central node'],
-      [['Esc'], 'Deselect'],
     ]],
     ['Organize', [
       [[ALT, '↑ ↓'], 'Reorder among siblings'],
-      [[MOD, '/'], 'Collapse or expand a branch'],
+      [[MOD, '/'], 'Collapse or expand the selected branches'],
       [[MOD, 'Shift', '← →'], 'Move a first-level branch to the other side'],
-      [['Drag'], 'Drop on a node to nest under it, or between nodes to reorder'],
+      [['Drag'], 'Drop the selection on a node to nest under it, or between nodes to reorder'],
       [[MOD, 'Z'], 'Undo'],
       [[MOD, 'Shift', 'Z'], 'Redo'],
     ]],
     ['Style', [
-      [[MOD, 'B'], 'Bold (selected text while editing, or the node)'],
-      [[MOD, 'Shift', 'X'], 'Strikethrough (selected text while editing, or the node)'],
+      [[MOD, 'B'], 'Bold (selected text while editing, or every selected node)'],
+      [[MOD, 'Shift', 'X'], 'Strikethrough (selected text while editing, or every selected node)'],
       [[MOD, 'I'], 'Italic (selected text, while editing)'],
       [[MOD, 'U'], 'Underline (selected text, while editing)'],
-      [[MOD, 'Shift', 'C'], 'Copy the node’s style'],
-      [[MOD, 'Shift', 'V'], 'Paste the copied style'],
+      [[MOD, 'Shift', 'C'], 'Copy the primary node’s style'],
+      [[MOD, 'Shift', 'V'], 'Paste the copied style onto every selected node'],
     ]],
     ['View', [
       [['Scroll'], 'Pan'],
@@ -2052,7 +2188,7 @@
   /** True while map-level shortcuts must stay out of the way: no editor, mid-gesture, text field focused, or a node being edited. */
   function shortcutsBlocked(e) {
     if (!state.map || el.editor.hidden) return true;
-    if (resizeDrag || (nodeDrag && nodeDrag.active)) return true;   // no tree mutations mid-gesture (Escape is handled upstream)
+    if (resizeDrag || marquee || (nodeDrag && nodeDrag.active)) return true;   // no tree mutations mid-gesture (Escape is handled upstream)
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return true;
     return !!state.editingId;
@@ -2075,6 +2211,11 @@
     if (key === '?' ) { e.preventDefault(); toggleHelp(); return; }
     if (key === 'Escape') { e.preventDefault(); if (!el.help.hidden) el.help.hidden = true; else select(null); return; }
     if (key === 'Home') { e.preventDefault(); select(state.map.root.id); return; }
+    if (mod && !e.shiftKey && key.toLowerCase() === 'a') {
+      e.preventDefault();   // every rendered node; the primary survives when it has one
+      Selection.set(state.layout.nodes.map(ln => ln.id), { primary: state.primaryId || state.map.root.id });
+      return;
+    }
     if (!has) {
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Enter'].includes(key)) { e.preventDefault(); select(state.map.root.id); }
       return;
@@ -2083,15 +2224,15 @@
     // selection-based
     if (key === 'Tab' || (key === 'Enter' && e.shiftKey)) { e.preventDefault(); const n = addChild(id); if (n) startEdit(n.id); return; }
     if (key === 'Enter') { e.preventDefault(); const n = addSibling(id); if (n) startEdit(n.id); return; }
-    if (key === 'Backspace' || key === 'Delete') { e.preventDefault(); deleteNode(id); return; }
+    if (key === 'Backspace' || key === 'Delete') { e.preventDefault(); deleteSelection(); return; }
     if (key === ' ' || key === 'F2') { e.preventDefault(); startEdit(id); return; }
-    if (mod && key === '/') { e.preventDefault(); toggleCollapse(id); return; }
+    if (mod && key === '/') { e.preventDefault(); toggleCollapseSelection(); return; }
     if (mod && !e.shiftKey && key.toLowerCase() === 'i') { e.preventDefault(); setNotesPaneOpen(!el.notesPane || el.notesPane.hidden); return; }
-    if (mod && !e.shiftKey && key.toLowerCase() === 'b') { e.preventDefault(); toggleStyle(id, 'bold'); return; }
-    if (mod && e.shiftKey && key.toLowerCase() === 'x') { e.preventDefault(); toggleStyle(id, 'strike'); return; }
+    if (mod && !e.shiftKey && key.toLowerCase() === 'b') { e.preventDefault(); toggleStyleMany(Selection.ids(), 'bold', id); return; }
+    if (mod && e.shiftKey && key.toLowerCase() === 'x') { e.preventDefault(); toggleStyleMany(Selection.ids(), 'strike', id); return; }
     if (mod && e.shiftKey && key.toLowerCase() === 'c') { e.preventDefault(); copyStyle(id); return; }
-    if (mod && e.shiftKey && key.toLowerCase() === 'v') { e.preventDefault(); pasteStyle(id); return; }
-    if (mod && !e.shiftKey && key.toLowerCase() === 'c') { e.preventDefault(); copyNode(id); return; }
+    if (mod && e.shiftKey && key.toLowerCase() === 'v') { e.preventDefault(); pasteStyleMany(Selection.ids()); return; }
+    if (mod && !e.shiftKey && key.toLowerCase() === 'c') { e.preventDefault(); copySelection(); return; }
     // plain Cmd/Ctrl+V is deliberately NOT intercepted: the browser's `paste` event (below) carries the system clipboard text
     if (mod && e.shiftKey && key === 'ArrowLeft') { e.preventDefault(); setSide(id, 'L'); return; }
     if (mod && e.shiftKey && key === 'ArrowRight') { e.preventDefault(); setSide(id, 'R'); return; }
@@ -2128,7 +2269,7 @@
     const clip = readNodeClip();
     const internalWins = clip && (typeof clip.outline !== 'string' || !readable || !text.trim()
       || normalizeEol(text) === normalizeEol(clip.outline));
-    if (internalWins) { pasteNode(id); return; }
+    if (internalWins) { pasteClip(id); return; }
     if (readable && text.trim()) { pasteText(id, parseOutline(text)); return; }
     if (!readable) showToast("Couldn't read the system clipboard");
   });
@@ -2184,5 +2325,5 @@
   });
 
   // Small read/select hook for alternative front-ends (see tactical.html) and console verification. Additive only.
-  window.Mindmap = { state, select, findNode: id => (state.map ? findNode(state.map.root, id) : null), startEdit, commitEdit, readNodeClip, writeNodeClip, copyNode, pasteNode, pasteText, outlineText, parseOutline, showToast, Usage, PALETTE };
+  window.Mindmap = { state, select, Selection: { ids: Selection.ids, roots: Selection.roots }, findNode: id => (state.map ? findNode(state.map.root, id) : null), startEdit, commitEdit, readNodeClip, writeNodeClip, copyNode, copySelection, pasteNode, pasteClip, pasteText, outlineText, parseOutline, showToast, Usage, PALETTE };
 })();

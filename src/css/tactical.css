@@ -210,6 +210,9 @@ body { background: var(--bg); color: var(--text); }
 }
 .node.selected::before, .node.editing::before { top: -9px; left: -9px; border-right: 0; border-bottom: 0; }
 .node.selected::after, .node.editing::after { bottom: -9px; right: -9px; border-left: 0; border-top: 0; }
+/* multi-selection: the primary's brackets are heavier and larger — a shape cue, not a color one */
+.viewport.multi-select .node.selected.primary::before, .viewport.multi-select .node.selected.primary::after { width: 14px; height: 14px; border-width: 4px; }
+.marquee { border-radius: 0; border: 1px dashed var(--amber); background: rgba(255, 176, 46, .08); }
 .node.editing { outline-style: solid; }
 .node.depth-1.editing, .node.depth-n.editing { background: var(--surface-2); color: var(--text-bright); }
 .node-text[contenteditable="true"] { caret-color: var(--phos); }
@@ -234,6 +237,7 @@ body { background: var(--bg); color: var(--text); }
 .stylebar .sb-btn:hover { background: var(--phos-faint); color: var(--phos); }
 .stylebar .sb-btn.active, .stylebar .sb-btn.open { background: var(--phos); color: #04170a; }
 .stylebar .sb-btn.flash { background: var(--amber); color: #04170a; }
+.stylebar .sb-count { border-radius: 0; background: var(--phos); color: #04170a; letter-spacing: 0.08em; }
 .sb-swatch { border-radius: 0; border-color: var(--line); }
 .stylebar .sb-a { border-radius: 0; box-shadow: 0 0 0 1.5px var(--line); }
 .sb-pop { border-radius: 0; background: var(--bg-2); border-color: var(--phos); }

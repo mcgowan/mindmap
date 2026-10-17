@@ -57,9 +57,11 @@
     if (!state.map || !state.layout) return;
 
     const sel = state.selectedId && M.findNode(state.selectedId);
+    const selCount = state.selectedIds.length;
+    const lockName = sel ? sel.node.text.toUpperCase() : 'NONE';
     const storeLabel = ($('#editor [data-storage-usage]') || {}).textContent || '';
     const storeWarn = document.body.dataset.storageWarn === '1';
-    const sig = [state.selectedId, state.editingId, state.map.updatedAt, state.layout.nodes.length,
+    const sig = [state.selectedId, state.selectedIds.join(), state.editingId, state.map.updatedAt, state.layout.nodes.length,
       $('#zoom-level').textContent, $('#save-status').className, storeLabel, storeWarn, sel && JSON.stringify(sel.node.style || {})].join('|');
     if (sig === lastSig) return;
     const typingNotes = document.activeElement && document.activeElement.classList.contains('notes-input');
@@ -85,14 +87,15 @@
     store.textContent = storeLabel ? `LOCAL STORE · ${storeLabel.toUpperCase()}` : 'LOCAL STORE';
     store.classList.toggle('hud__amber', storeWarn);
     const lock = $('.js-hud-lock');
-    lock.textContent = sel ? sel.node.text.toUpperCase() : 'NONE';
+    lock.textContent = lockName;
     lock.classList.toggle('hud__red', !sel);
-    $('.js-hud-lock-sub').textContent = sel ? (state.editingId ? 'EDITING' : `DEPTH ${sel.depth} · ${sel.node.children.length} CHILD${sel.node.children.length === 1 ? '' : 'REN'}`) : 'NO TARGET';
+    const lockSub = sel ? (state.editingId ? 'EDITING' : `DEPTH ${sel.depth} · ${sel.node.children.length} CHILD${sel.node.children.length === 1 ? '' : 'REN'}`) : 'NO TARGET';
+    $('.js-hud-lock-sub').textContent = selCount > 1 ? `${selCount} SELECTED · ${lockSub}` : lockSub;
 
     $('.js-st-nodes').textContent = total;
     $('.js-st-branches').textContent = branches;
     $('.js-st-depth').textContent = depth;
-    $('.js-st-lock').textContent = sel ? sel.node.text.toUpperCase() : 'NONE';
+    $('.js-st-lock').textContent = selCount > 1 ? `${lockName} +${selCount - 1}` : lockName;
 
     const status = $('.js-lock-status');
     status.textContent = state.editingId ? 'EDITING' : (sel ? 'LOCKED' : 'NO LOCK');
